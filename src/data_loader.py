@@ -66,6 +66,77 @@ class TimeSeriesDataset(Dataset):
         
         return torch.FloatTensor(x), torch.FloatTensor(y)
 
+def load_weather_data(data_path, selected_params=None):
+    """
+    Load weather data from DWD.
+    
+    Args:
+        data_path (str): Path to the weather data
+        selected_params (list): List of weather parameters to select
+        
+    Returns:
+        pd.DataFrame: Processed weather data
+    """
+    # In a real implementation, this would load data from DWD
+    # For this implementation, we'll simulate the data loading
+    
+    # Create a date range for demonstration
+    dates = pd.date_range(start='2015-01-01', end='2021-12-31', freq='h')
+    
+    # Create a DataFrame with all weather parameters
+    weather_params = [
+        'sunshine_duration', 'global_radiation', 'diffuse_solar_radiation',
+        'wind_speed', 'wind_direction', 'temperature', 'pressure',
+        'humidity', 'cloudiness'
+    ]
+    
+    # Initialize DataFrame with dates
+    weather_data = pd.DataFrame(index=dates)
+    
+    # Add weather parameters with random values
+    for param in weather_params:
+        # Generate random values appropriate for each parameter
+        if param == 'sunshine_duration':
+            # Sunshine duration in minutes (0-60)
+            values = np.random.randint(0, 61, size=len(dates))
+            # Set to 0 during night hours
+            values[weather_data.index.hour < 6] = 0
+            values[weather_data.index.hour > 20] = 0
+        elif param in ['global_radiation', 'diffuse_solar_radiation']:
+            # Radiation in W/m² (0-1000)
+            values = np.random.randint(0, 1001, size=len(dates))
+            # Set to 0 during night hours
+            values[weather_data.index.hour < 6] = 0
+            values[weather_data.index.hour > 20] = 0
+        elif param == 'wind_speed':
+            # Wind speed in m/s (0-30)
+            values = np.random.uniform(0, 30, size=len(dates))
+        elif param == 'wind_direction':
+            # Wind direction in degrees (0-360)
+            values = np.random.uniform(0, 360, size=len(dates))
+        elif param == 'temperature':
+            # Temperature in °C (-10 to 35)
+            values = np.random.uniform(-10, 35, size=len(dates))
+            # Add seasonal pattern
+            season = np.sin(2 * np.pi * (weather_data.index.dayofyear / 365))
+            values += 15 * season
+        elif param == 'pressure':
+            # Pressure in hPa (980-1030)
+            values = np.random.uniform(980, 1030, size=len(dates))
+        elif param == 'humidity':
+            # Humidity in % (20-100)
+            values = np.random.uniform(20, 100, size=len(dates))
+        elif param == 'cloudiness':
+            # Cloudiness in % (0-100)
+            values = np.random.uniform(0, 100, size=len(dates))
+        
+        weather_data[param] = values
+    
+    # Filter selected parameters if specified
+    if selected_params:
+        weather_data = weather_data[selected_params]
+    
+    return weather_data
 
 def load_electricity_data(data_path, energy_type, start_date=None, end_date=None):
     """
@@ -253,7 +324,9 @@ def prepare_data(config, energy_type):
     else:
         selected_params = config.WEATHER_PARAMS_ALL
     
-    # Load data    
+    # Load data
+    weather_data = load_weather_data(config.DATA_PATH, selected_params)
+    
     # Try to use real data from CodeGreen API with a date range
     # Default to recent data (last 2 months)
     end_date = datetime.now()
@@ -268,10 +341,11 @@ def prepare_data(config, energy_type):
     )
     
     # Print data info for debugging
+    print(f"Weather data shape: {weather_data.shape}, date range: {weather_data.index.min()} to {weather_data.index.max()}")
     print(f"Electricity data shape: {electricity_data.shape}, date range: {electricity_data.index.min()} to {electricity_data.index.max()}")
     
     # Preprocess data
-    processed_data, scalers = preprocess_data( electricity_data, selected_params)
+    processed_data, scalers = preprocess_data(weather_data, electricity_data, selected_params)
     
     # Print processed data info
     print(f"Processed data shape: {processed_data.shape}")

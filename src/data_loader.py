@@ -138,6 +138,73 @@ def load_weather_data(data_path, selected_params=None):
     
     return weather_data
 
+def load_electricity_data_from_api(energy_type, start_date=None, end_date=None):
+    """
+    Load electricity generation data from CodeGreen API.
+    
+    Args:
+        energy_type (str): Type of energy ('pv' or 'wind')
+        start_date (datetime): Start date for data retrieval
+        end_date (datetime): End date for data retrieval
+        
+    Returns:
+        pd.DataFrame: Processed electricity generation data
+        dict: Column categories from the API
+    """
+    if not CODEGREEN_AVAILABLE:
+        raise ImportError("codegreen_core package is not available")
+    
+    # Default to recent data if dates not provided
+    if start_date is None:
+        start_date = datetime.now() - timedelta(days=60)
+    if end_date is None:
+        end_date = datetime.now()
+    
+    # Get data from CodeGreen API
+    country_code = 'DE'  # Germany
+    data_type = 'generation'
+    
+    try:
+        result = energy(country_code, start_date, end_date, data_type)
+        
+        if not result.get('data_available', False):
+            error_msg = result.get('error', 'Unknown error')
+            raise ValueError(f"Data not available from CodeGreen API: {error_msg}")
+        
+        # Extract dataframe and column categories
+        df = result['data']
+        columns = result.get('columns', {})
+        
+        # Process the dataframe for the specific energy type
+        if energy_type == 'pv':
+            # For PV, use Solar column
+            if 'Solar' in df.columns:
+                electricity_data = pd.DataFrame(index=df.index)
+                electricity_data['generation'] = df['Solar']
+            else:
+                # Try to find solar in renewable columns
+                solar_cols = [col for col in df.columns if 'solar' in col.lower()]
+                if solar_cols:
+                    electricity_data = pd.DataFrame(index=df.index)
+                    electricity_data['generation'] = df[solar_cols[0]]
+                else:
+                    raise ValueError("Solar generation data not found in API response")
+        
+        elif energy_type == 'wind':
+            # For wind, combine onshore and offshore if available
+            wind_cols = [col for col in df.columns if 'wind' in col.lower()]
+            if wind_cols:
+                electricity_data = pd.DataFrame(index=df.index)
+                electricity_data['generation'] = df[wind_cols].sum(axis=1)
+            else:
+                raise ValueError("Wind generation data not found in API response")
+        
+        return electricity_data, columns
+    
+    except Exception as e:
+        print(f"Error fetching data from CodeGreen API: {str(e)}")
+        raise
+
 def load_electricity_data(data_path, energy_type, start_date=None, end_date=None):
     """
     Load electricity generation data from SMARD via CodeGreen API or fallback to simulation.
@@ -151,6 +218,15 @@ def load_electricity_data(data_path, energy_type, start_date=None, end_date=None
     Returns:
         pd.DataFrame: Processed electricity generation data
     """
+    # Try to load data from CodeGreen API if available
+    if CODEGREEN_AVAILABLE:
+        try:
+            electricity_data, _ = load_electricity_data_from_api(energy_type, start_date, end_date)
+            print(f"Successfully loaded {energy_type} data from CodeGreen API")
+            return electricity_data
+        except Exception as e:
+            print(f"Failed to load data from CodeGreen API: {str(e)}")
+            print("Falling back to simulated data")
     
     # Fallback to simulated data
     print(f"Using simulated {energy_type} data")

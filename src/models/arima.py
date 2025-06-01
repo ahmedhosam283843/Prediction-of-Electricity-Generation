@@ -68,4 +68,46 @@ class ARIMAModel:
         
         return forecast.values
     
-
+    def evaluate(self, test_data, n_steps):
+        """
+        Evaluate the model on test data.
+        
+        Args:
+            test_data (np.array): Test data time series
+            n_steps (int): Number of steps to forecast
+            
+        Returns:
+            dict: Dictionary of evaluation metrics
+        """
+        if self.model_fit is None:
+            raise ValueError("Model must be fitted before evaluation")
+        
+        # Generate forecast
+        forecast = self.predict(n_steps)
+        
+        # Calculate metrics
+        mse = mean_squared_error(test_data[:n_steps], forecast)
+        rmse = np.sqrt(mse)
+        mae = mean_absolute_error(test_data[:n_steps], forecast)
+        mape = np.mean(np.abs((test_data[:n_steps] - forecast) / test_data[:n_steps])) * 100
+        
+        return {
+            'mse': mse,
+            'rmse': rmse,
+            'mae': mae,
+            'mape': mape
+        }
+    
+    def fit_predict(self, train_data, n_steps):
+        """
+        Fit the model and generate forecasts in one step.
+        
+        Args:
+            train_data (np.array): Training data time series
+            n_steps (int): Number of steps to forecast
+            
+        Returns:
+            np.array: Forecasted values
+        """
+        self.fit(train_data)
+        return self.predict(n_steps)

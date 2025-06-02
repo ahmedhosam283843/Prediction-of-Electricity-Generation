@@ -17,3 +17,8 @@ The paper compares several deep learning models for forecasting electricity gene
    - LSTM (Long Short-Term Memory)
    - ARIMA (Autoregressive Integrated Moving Average)
 
+
+## Model Descriptions
+
+### FEDformer
+The FEDformer model uses frequency-enhanced decomposition and Fourier transform for time series forecasting.

@@ -411,77 +411,37 @@ def load_weather_data_simulated(start_date, end_date, selected_params=None):
     
     return weather_data
 
-def load_weather_data(data_path, selected_params=None):
+def load_weather_data(data_path=None, selected_params=None, use_real_data=True, 
+                     lat=52.52, lon=13.405, start_date=None, end_date=None):
     """
-    Load weather data from DWD.
+    Load weather data from DWD (real) or generate simulated data.
     
     Args:
-        data_path (str): Path to the weather data
+        data_path (str): Path to the weather data (unused for real data)
         selected_params (list): List of weather parameters to select
+        use_real_data (bool): Whether to use real DWD data or simulated data
+        lat (float): Latitude for DWD station selection
+        lon (float): Longitude for DWD station selection
+        start_date (datetime): Start date for data retrieval
+        end_date (datetime): End date for data retrieval
         
     Returns:
         pd.DataFrame: Processed weather data
     """
-    # In a real implementation, this would load data from DWD
-    # For this implementation, we'll simulate the data loading
+    if use_real_data:
+        try:
+            return load_weather_data_real(lat, lon, start_date, end_date, selected_params)
+        except Exception as e:
+            print(f"Error loading real DWD data: {e}")
+            print("Falling back to simulated data")
     
-    # Create a date range for demonstration
-    dates = pd.date_range(start='2015-01-01', end='2021-12-31', freq='h')
-    
-    # Create a DataFrame with all weather parameters
-    weather_params = [
-        'sunshine_duration', 'global_radiation', 'diffuse_solar_radiation',
-        'wind_speed', 'wind_direction', 'temperature', 'pressure',
-        'humidity', 'cloudiness'
-    ]
-    
-    # Initialize DataFrame with dates
-    weather_data = pd.DataFrame(index=dates)
-    
-    # Add weather parameters with random values
-    for param in weather_params:
-        # Generate random values appropriate for each parameter
-        if param == 'sunshine_duration':
-            # Sunshine duration in minutes (0-60)
-            values = np.random.randint(0, 61, size=len(dates))
-            # Set to 0 during night hours
-            values[weather_data.index.hour < 6] = 0
-            values[weather_data.index.hour > 20] = 0
-        elif param in ['global_radiation', 'diffuse_solar_radiation']:
-            # Radiation in W/m² (0-1000)
-            values = np.random.randint(0, 1001, size=len(dates))
-            # Set to 0 during night hours
-            values[weather_data.index.hour < 6] = 0
-            values[weather_data.index.hour > 20] = 0
-        elif param == 'wind_speed':
-            # Wind speed in m/s (0-30)
-            values = np.random.uniform(0, 30, size=len(dates))
-        elif param == 'wind_direction':
-            # Wind direction in degrees (0-360)
-            values = np.random.uniform(0, 360, size=len(dates))
-        elif param == 'temperature':
-            # Temperature in °C (-10 to 35)
-            values = np.random.uniform(-10, 35, size=len(dates))
-            # Add seasonal pattern
-            season = np.sin(2 * np.pi * (weather_data.index.dayofyear / 365))
-            values += 15 * season
-        elif param == 'pressure':
-            # Pressure in hPa (980-1030)
-            values = np.random.uniform(980, 1030, size=len(dates))
-        elif param == 'humidity':
-            # Humidity in % (20-100)
-            values = np.random.uniform(20, 100, size=len(dates))
-        elif param == 'cloudiness':
-            # Cloudiness in % (0-100)
-            values = np.random.uniform(0, 100, size=len(dates))
+    # Fallback to simulated data
+    if start_date is None:
+        start_date = datetime(2015, 1, 1)
+    if end_date is None:
+        end_date = datetime(2021, 12, 31)
         
-        weather_data[param] = values
-    
-    # Filter selected parameters if specified
-    if selected_params:
-        weather_data = weather_data[selected_params]
-    
-    return weather_data
+    return load_weather_data_simulated(start_date, end_date, selected_params)
 
 def load_electricity_data_from_api(energy_type, start_date=None, end_date=None):
     """

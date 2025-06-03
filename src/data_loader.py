@@ -120,6 +120,28 @@ def get_dwd_stations():
         print(f"Error fetching DWD stations: {e}")
         return pd.DataFrame()
 
+def find_nearest_station(lat, lon, stations_df):
+    """
+    Find the nearest DWD station to given coordinates.
+    
+    Args:
+        lat (float): Latitude
+        lon (float): Longitude
+        stations_df (pd.DataFrame): DWD stations dataframe
+        
+    Returns:
+        str: Station ID of nearest station
+    """
+    if stations_df.empty:
+        return None
+    
+    # Calculate distances
+    stations_df = stations_df.dropna(subset=['lat', 'lon'])
+    distances = np.sqrt((stations_df['lat'] - lat)**2 + (stations_df['lon'] - lon)**2)
+    nearest_idx = distances.idxmin()
+    
+    return stations_df.loc[nearest_idx, 'station_id']
+
 def load_weather_data(data_path, selected_params=None):
     """
     Load weather data from DWD.

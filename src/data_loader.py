@@ -2,7 +2,7 @@
 Data loading and preprocessing utilities for wind and solar energy prediction.
 
 This module handles:
-1. Loading weather data from German Weather Service (DWD)
+1. Loading weather data from Open-Meteo API
 2. Loading electricity generation data from SMARD via CodeGreen API
 3. Data preprocessing and feature engineering
 4. Dataset creation for model training
@@ -16,9 +16,6 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from datetime import datetime, timedelta
 import requests
-from io import StringIO
-import zipfile
-from datetime import datetime, timedelta
 import warnings
 
 # Import CodeGreen API for real data
@@ -71,184 +68,9 @@ class TimeSeriesDataset(Dataset):
         
         return torch.FloatTensor(x), torch.FloatTensor(y)
 
-def get_dwd_stations():
-    """
-    Get list of DWD weather stations.
-    
-    Returns:
-        pd.DataFrame: DataFrame with station information
-    """
-    # DWD station list URL (for hourly data)
-    station_url = "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/air_temperature/recent/TU_Stundenwerte_Beschreibung_Stationen.txt"
-    
-    try:
-        response = requests.get(station_url, timeout=30)
-        response.raise_for_status()
-        
-        # Parse the station data (fixed-width format)
-        lines = response.text.split('\n')[2:]  # Skip header lines
-        stations = []
-        
-        for line in lines:
-            if len(line.strip()) > 0:
-                # Parse fixed-width format
-                try:
-                    station_id = line[0:5].strip()
-                    start_date = line[6:14].strip()
-                    end_date = line[15:23].strip()
-                    height = line[24:38].strip()
-                    lat = line[39:50].strip()
-                    lon = line[51:60].strip()
-                    name = line[61:].strip()
-                    
-                    if station_id and station_id.isdigit():
-                        stations.append({
-                            'station_id': station_id,
-                            'start_date': start_date,
-                            'end_date': end_date,
-                            'height': height,
-                            'lat': float(lat) if lat else None,
-                            'lon': float(lon) if lon else None,
-                            'name': name
-                        })
-                except (ValueError, IndexError):
-                    continue
-        
-        return pd.DataFrame(stations)
-    
-    except Exception as e:
-        print(f"Error fetching DWD stations: {e}")
-        return pd.DataFrame()
-
-def find_nearest_station(lat, lon, stations_df):
-    """
-    Find the nearest DWD station to given coordinates.
-    
-    Args:
-        lat (float): Latitude
-        lon (float): Longitude
-        stations_df (pd.DataFrame): DWD stations dataframe
-        
-    Returns:
-        str: Station ID of nearest station
-    """
-    if stations_df.empty:
-        return None
-    
-    # Calculate distances
-    stations_df = stations_df.dropna(subset=['lat', 'lon'])
-    distances = np.sqrt((stations_df['lat'] - lat)**2 + (stations_df['lon'] - lon)**2)
-    nearest_idx = distances.idxmin()
-    
-    return stations_df.loc[nearest_idx, 'station_id']
-
-def download_dwd_data(station_id, parameter, start_date, end_date):
-    """
-    Download DWD data for a specific station and parameter.
-    
-    Args:
-        station_id (str): DWD station ID
-        parameter (str): Weather parameter
-        start_date (datetime): Start date
-        end_date (datetime): End date
-        
-    Returns:
-        pd.DataFrame: Weather data
-    """
-    # Parameter mapping to DWD URLs and file patterns
-    param_mapping = {
-        'temperature': {
-            'url_recent': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/air_temperature/recent/',
-            'url_historical': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/air_temperature/historical/',
-            'file_pattern': f'stundenwerte_TU_{station_id:0>5}_'
-        },
-        'solar': {
-            'url_recent': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/solar/',
-            'url_historical': None,  # Solar data only available recent
-            'file_pattern': f'stundenwerte_ST_{station_id:0>5}_'
-        },
-        'wind': {
-            'url_recent': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/wind/recent/',
-            'url_historical': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/wind/historical/',
-            'file_pattern': f'stundenwerte_FF_{station_id:0>5}_'
-        },
-        'pressure': {
-            'url_recent': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/pressure/recent/',
-            'url_historical': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/pressure/historical/',
-            'file_pattern': f'stundenwerte_P0_{station_id:0>5}_'
-        },
-        'cloudiness': {
-            'url_recent': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/cloudiness/recent/',
-            'url_historical': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/cloudiness/historical/',
-            'file_pattern': f'stundenwerte_N_{station_id:0>5}_'
-        }
-    }
-    
-    if parameter not in param_mapping:
-        print(f"Parameter {parameter} not supported")
-        return pd.DataFrame()
-    
-    param_info = param_mapping[parameter]
-    station_id_str = f"{int(station_id):05d}"
-    
-    # Try recent data first
-    try:
-        data_url = param_info['url_recent']
-        response = requests.get(data_url, timeout=30)
-        response.raise_for_status()
-        
-        # Find the correct file
-        file_pattern = param_info['file_pattern']
-        files = [line for line in response.text.split('\n') if file_pattern in line and '.zip' in line]
-        
-        if not files:
-            print(f"No files found for station {station_id} and parameter {parameter}")
-            return pd.DataFrame()
-        
-        # Get the most recent file
-        zip_file = files[-1].split('"')[1] if '"' in files[-1] else files[-1].split()[-1]
-        zip_url = data_url + zip_file
-        
-        # Download and extract the zip file
-        zip_response = requests.get(zip_url, timeout=60)
-        zip_response.raise_for_status()
-        
-        # Extract CSV from zip
-        with zipfile.ZipFile(StringIO(zip_response.content.decode('latin-1')), 'r') as zip_ref:
-            csv_files = [f for f in zip_ref.namelist() if f.endswith('.txt')]
-            if not csv_files:
-                print(f"No CSV files found in zip for station {station_id}")
-                return pd.DataFrame()
-            
-            csv_content = zip_ref.read(csv_files[0]).decode('latin-1')
-            
-        # Parse CSV data
-        df = pd.read_csv(StringIO(csv_content), sep=';', skipinitialspace=True)
-        
-        # Clean up the dataframe
-        if 'MESS_DATUM' in df.columns:
-            # Convert timestamp
-            df['MESS_DATUM'] = pd.to_datetime(df['MESS_DATUM'], format='%Y%m%d%H', errors='coerce')
-            df = df.set_index('MESS_DATUM')
-            
-            # Filter by date range
-            df = df[(df.index >= start_date) & (df.index <= end_date)]
-            
-            # Replace -999 (missing values) with NaN
-            df = df.replace(-999, np.nan)
-            
-            return df
-        else:
-            print(f"MESS_DATUM column not found in data for station {station_id}")
-            return pd.DataFrame()
-            
-    except Exception as e:
-        print(f"Error downloading data for station {station_id}, parameter {parameter}: {e}")
-        return pd.DataFrame()
-
 def load_weather_data_real(lat=52.52, lon=13.405, start_date=None, end_date=None, selected_params=None):
     """
-    Load real weather data from DWD for specified location and time range.
+    Load real weather data from Open-Meteo API for specified location and time range.
     
     Args:
         lat (float): Latitude (default: Berlin)
@@ -258,106 +80,87 @@ def load_weather_data_real(lat=52.52, lon=13.405, start_date=None, end_date=None
         selected_params (list): List of weather parameters to select
         
     Returns:
-        pd.DataFrame: Real weather data from DWD
+        pd.DataFrame: Real weather data from Open-Meteo
     """
     if start_date is None:
         start_date = datetime.now() - timedelta(days=30)
     if end_date is None:
         end_date = datetime.now()
     
-    print(f"Loading real DWD weather data for coordinates ({lat}, {lon})")
+    print(f"Loading real weather data from Open-Meteo for coordinates ({lat}, {lon})")
     print(f"Date range: {start_date} to {end_date}")
     
-    # Get DWD stations
-    print("Fetching DWD station list...")
-    stations_df = get_dwd_stations()
+    # Convert dates to strings
+    start_str = start_date.strftime('%Y-%m-%d')
+    end_str = end_date.strftime('%Y-%m-%d')
     
-    if stations_df.empty:
-        print("Could not fetch DWD stations, falling back to simulated data")
+    # Parameter mapping from project config to Open-Meteo API variables
+    PARAM_MAPPING = {
+        'temperature': 'temperature_2m',
+        'wind_speed': 'wind_speed_10m',
+        'wind_direction': 'wind_direction_10m',
+        'pressure': 'pressure_msl',
+        'global_radiation': 'shortwave_radiation',
+        'diffuse_solar_radiation': 'diffuse_radiation',
+        'sunshine_duration': 'sunshine_duration',  # proxy, as sunshine duration is not directly available
+        'humidity': 'relative_humidity_2m',
+        'cloudiness': 'cloud_cover',
+    }
+    
+    # Get unique Open-Meteo variables needed
+    open_meteo_vars = list(set(PARAM_MAPPING.get(param, param) for param in selected_params))
+    
+    # Construct API URL
+    base_url = "https://archive-api.open-meteo.com/v1/archive"
+    params = {
+        'latitude': lat,
+        'longitude': lon,
+        'start_date': start_str,
+        'end_date': end_str,
+        'hourly': ','.join(open_meteo_vars),
+        'timezone': 'auto',  # Use local time for the location
+    }
+    
+    try:
+        # Make the API request
+        response = requests.get(base_url, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Extract hourly data
+        if 'hourly' not in data:
+            raise ValueError("No hourly data in response")
+        
+        hourly = data['hourly']
+        
+        # Create DataFrame
+        df = pd.DataFrame(hourly)
+        df['time'] = pd.to_datetime(df['time'])
+        df.set_index('time', inplace=True)
+        
+        # Create weather_data DataFrame with selected parameters
+        weather_data = pd.DataFrame(index=df.index)
+        for param in selected_params:
+            om_var = PARAM_MAPPING.get(param, param)
+            if om_var in df.columns:
+                weather_data[param] = df[om_var]
+            else:
+                print(f"Warning: Parameter {param} not available in data")
+                weather_data[param] = np.nan
+        
+        # Interpolate missing values
+        weather_data = weather_data.interpolate(method='time')
+        
+        print(f"Successfully loaded real weather data from Open-Meteo with shape: {weather_data.shape}")
+        print(f"Available parameters: {weather_data.columns.tolist()}")
+        print(f"Date range: {weather_data.index.min()} to {weather_data.index.max()}")
+        
+        return weather_data
+    
+    except Exception as e:
+        print(f"Error loading real weather data from Open-Meteo: {e}")
+        print("Falling back to simulated data")
         return load_weather_data_simulated(start_date, end_date, selected_params)
-    
-    # Find nearest station
-    nearest_station = find_nearest_station(lat, lon, stations_df)
-    if not nearest_station:
-        print("Could not find nearest station, falling back to simulated data")
-        return load_weather_data_simulated(start_date, end_date, selected_params)
-    
-    station_info = stations_df[stations_df['station_id'] == nearest_station].iloc[0]
-    print(f"Using station: {nearest_station} - {station_info['name']}")
-    
-    # Download different parameter types
-    all_data = {}
-    
-    # Temperature data
-    print("Downloading temperature data...")
-    temp_data = download_dwd_data(nearest_station, 'temperature', start_date, end_date)
-    if not temp_data.empty and 'TT_TU' in temp_data.columns:
-        all_data['temperature'] = temp_data['TT_TU']
-    
-    # Solar data
-    print("Downloading solar data...")
-    solar_data = download_dwd_data(nearest_station, 'solar', start_date, end_date)
-    if not solar_data.empty:
-        if 'FG_LBERG' in solar_data.columns:
-            all_data['global_radiation'] = solar_data['FG_LBERG']
-        if 'SD_LBERG' in solar_data.columns:
-            all_data['sunshine_duration'] = solar_data['SD_LBERG']
-    
-    # Wind data
-    print("Downloading wind data...")
-    wind_data = download_dwd_data(nearest_station, 'wind', start_date, end_date)
-    if not wind_data.empty:
-        if 'FF' in wind_data.columns:
-            all_data['wind_speed'] = wind_data['FF']
-        if 'DD' in wind_data.columns:
-            all_data['wind_direction'] = wind_data['DD']
-    
-    # Pressure data
-    print("Downloading pressure data...")
-    pressure_data = download_dwd_data(nearest_station, 'pressure', start_date, end_date)
-    if not pressure_data.empty and 'P0' in pressure_data.columns:
-        all_data['pressure'] = pressure_data['P0']
-    
-    # Cloudiness data
-    print("Downloading cloudiness data...")
-    cloud_data = download_dwd_data(nearest_station, 'cloudiness', start_date, end_date)
-    if not cloud_data.empty and 'V_N' in cloud_data.columns:
-        all_data['cloudiness'] = cloud_data['V_N']
-    
-    # Combine all data
-    if not all_data:
-        print("No real data could be downloaded, falling back to simulated data")
-        return load_weather_data_simulated(start_date, end_date, selected_params)
-    
-    # Create combined dataframe
-    combined_df = pd.DataFrame(all_data)
-    
-    # Fill missing values with interpolation
-    combined_df = combined_df.interpolate(method='time')
-    
-    # Add derived parameters if missing
-    if 'humidity' not in combined_df.columns:
-        # Estimate humidity (this is a rough approximation)
-        combined_df['humidity'] = 70 + 20 * np.sin(2 * np.pi * combined_df.index.hour / 24)
-    
-    if 'diffuse_solar_radiation' not in combined_df.columns and 'global_radiation' in combined_df.columns:
-        # Estimate diffuse radiation as portion of global radiation
-        combined_df['diffuse_solar_radiation'] = combined_df['global_radiation'] * 0.3
-    
-    # Filter selected parameters if specified
-    if selected_params:
-        available_params = [param for param in selected_params if param in combined_df.columns]
-        if available_params:
-            combined_df = combined_df[available_params]
-        else:
-            print(f"None of the selected parameters {selected_params} are available in real data")
-            print(f"Available parameters: {combined_df.columns.tolist()}")
-    
-    print(f"Successfully loaded real DWD data with shape: {combined_df.shape}")
-    print(f"Available parameters: {combined_df.columns.tolist()}")
-    print(f"Date range: {combined_df.index.min()} to {combined_df.index.max()}")
-    
-    return combined_df
 
 def load_weather_data_simulated(start_date, end_date, selected_params=None):
     """
@@ -414,14 +217,14 @@ def load_weather_data_simulated(start_date, end_date, selected_params=None):
 def load_weather_data(data_path=None, selected_params=None, use_real_data=True, 
                      lat=52.52, lon=13.405, start_date=None, end_date=None):
     """
-    Load weather data from DWD (real) or generate simulated data.
+    Load weather data from Open-Meteo (real) or generate simulated data.
     
     Args:
         data_path (str): Path to the weather data (unused for real data)
         selected_params (list): List of weather parameters to select
-        use_real_data (bool): Whether to use real DWD data or simulated data
-        lat (float): Latitude for DWD station selection
-        lon (float): Longitude for DWD station selection
+        use_real_data (bool): Whether to use real Open-Meteo data or simulated data
+        lat (float): Latitude for weather data
+        lon (float): Longitude for weather data
         start_date (datetime): Start date for data retrieval
         end_date (datetime): End date for data retrieval
         
@@ -432,7 +235,7 @@ def load_weather_data(data_path=None, selected_params=None, use_real_data=True,
         try:
             return load_weather_data_real(lat, lon, start_date, end_date, selected_params)
         except Exception as e:
-            print(f"Error loading real DWD data: {e}")
+            print(f"Error loading real weather data: {e}")
             print("Falling back to simulated data")
     
     # Fallback to simulated data
@@ -688,7 +491,7 @@ def create_data_loaders(data, lookback_window, forecast_horizon, target_column,
 
 def prepare_data(config, energy_type):
     """
-    Prepare data for model training with real DWD weather data.
+    Prepare data for model training with real weather data from Open-Meteo.
     
     Args:
         config: Configuration object with data settings
@@ -724,14 +527,12 @@ def prepare_data(config, energy_type):
         end_date=end_date
     )
     
-    # Get location for DWD data (you can make this configurable)
-    # Default to Germany center coordinates
-    # You might want to add these to your config
+    # Get location for weather data
     lat = getattr(config, 'LOCATION_LAT', 52.52)  # Berlin latitude as default
     lon = getattr(config, 'LOCATION_LON', 13.405)  # Berlin longitude as default
     
-    # Load real weather data from DWD
-    print("Loading real weather data from DWD...")
+    # Load real weather data from Open-Meteo
+    print("Loading real weather data from Open-Meteo...")
     weather_data = load_weather_data(
         data_path=config.DATA_PATH,
         selected_params=selected_params,

@@ -688,7 +688,7 @@ def create_data_loaders(data, lookback_window, forecast_horizon, target_column,
 
 def prepare_data(config, energy_type):
     """
-    Prepare data for model training.
+    Prepare data for model training with real DWD weather data.
     
     Args:
         config: Configuration object with data settings
@@ -705,18 +705,39 @@ def prepare_data(config, energy_type):
     else:
         selected_params = config.WEATHER_PARAMS_ALL
     
-    # Load data
-    weather_data = load_weather_data(config.DATA_PATH, selected_params)
+    # Set up date range for both weather and electricity data
+    if getattr(config, 'DATA_END_DATE', None):
+        end_date = pd.to_datetime(config.DATA_END_DATE)
+    else:
+        end_date = datetime.now()
+    if getattr(config, 'DATA_START_DATE', None):
+        start_date = pd.to_datetime(config.DATA_START_DATE)
+    else:
+        start_date = end_date - timedelta(days=60)  # Last 60 days
     
-    # Try to use real data from CodeGreen API with a date range
-    # Default to recent data (last 2 months)
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=60)
-    
-    # Load electricity data (will use API if available, otherwise simulated)
+    print(f"Preparing {energy_type} energy data...")
+    # Load electricity data first (will use API if available, otherwise simulated)
     electricity_data = load_electricity_data(
         config.DATA_PATH, 
         energy_type,
+        start_date=start_date,
+        end_date=end_date
+    )
+    
+    # Get location for DWD data (you can make this configurable)
+    # Default to Germany center coordinates
+    # You might want to add these to your config
+    lat = getattr(config, 'LOCATION_LAT', 52.52)  # Berlin latitude as default
+    lon = getattr(config, 'LOCATION_LON', 13.405)  # Berlin longitude as default
+    
+    # Load real weather data from DWD
+    print("Loading real weather data from DWD...")
+    weather_data = load_weather_data(
+        data_path=config.DATA_PATH,
+        selected_params=selected_params,
+        use_real_data=True,  # Set to False to use simulated data
+        lat=lat,
+        lon=lon,
         start_date=start_date,
         end_date=end_date
     )

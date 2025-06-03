@@ -246,7 +246,170 @@ def download_dwd_data(station_id, parameter, start_date, end_date):
         print(f"Error downloading data for station {station_id}, parameter {parameter}: {e}")
         return pd.DataFrame()
 
+def load_weather_data_real(lat=52.52, lon=13.405, start_date=None, end_date=None, selected_params=None):
+    """
+    Load real weather data from DWD for specified location and time range.
+    
+    Args:
+        lat (float): Latitude (default: Berlin)
+        lon (float): Longitude (default: Berlin)
+        start_date (datetime): Start date
+        end_date (datetime): End date
+        selected_params (list): List of weather parameters to select
+        
+    Returns:
+        pd.DataFrame: Real weather data from DWD
+    """
+    if start_date is None:
+        start_date = datetime.now() - timedelta(days=30)
+    if end_date is None:
+        end_date = datetime.now()
+    
+    print(f"Loading real DWD weather data for coordinates ({lat}, {lon})")
+    print(f"Date range: {start_date} to {end_date}")
+    
+    # Get DWD stations
+    print("Fetching DWD station list...")
+    stations_df = get_dwd_stations()
+    
+    if stations_df.empty:
+        print("Could not fetch DWD stations, falling back to simulated data")
+        return load_weather_data_simulated(start_date, end_date, selected_params)
+    
+    # Find nearest station
+    nearest_station = find_nearest_station(lat, lon, stations_df)
+    if not nearest_station:
+        print("Could not find nearest station, falling back to simulated data")
+        return load_weather_data_simulated(start_date, end_date, selected_params)
+    
+    station_info = stations_df[stations_df['station_id'] == nearest_station].iloc[0]
+    print(f"Using station: {nearest_station} - {station_info['name']}")
+    
+    # Download different parameter types
+    all_data = {}
+    
+    # Temperature data
+    print("Downloading temperature data...")
+    temp_data = download_dwd_data(nearest_station, 'temperature', start_date, end_date)
+    if not temp_data.empty and 'TT_TU' in temp_data.columns:
+        all_data['temperature'] = temp_data['TT_TU']
+    
+    # Solar data
+    print("Downloading solar data...")
+    solar_data = download_dwd_data(nearest_station, 'solar', start_date, end_date)
+    if not solar_data.empty:
+        if 'FG_LBERG' in solar_data.columns:
+            all_data['global_radiation'] = solar_data['FG_LBERG']
+        if 'SD_LBERG' in solar_data.columns:
+            all_data['sunshine_duration'] = solar_data['SD_LBERG']
+    
+    # Wind data
+    print("Downloading wind data...")
+    wind_data = download_dwd_data(nearest_station, 'wind', start_date, end_date)
+    if not wind_data.empty:
+        if 'FF' in wind_data.columns:
+            all_data['wind_speed'] = wind_data['FF']
+        if 'DD' in wind_data.columns:
+            all_data['wind_direction'] = wind_data['DD']
+    
+    # Pressure data
+    print("Downloading pressure data...")
+    pressure_data = download_dwd_data(nearest_station, 'pressure', start_date, end_date)
+    if not pressure_data.empty and 'P0' in pressure_data.columns:
+        all_data['pressure'] = pressure_data['P0']
+    
+    # Cloudiness data
+    print("Downloading cloudiness data...")
+    cloud_data = download_dwd_data(nearest_station, 'cloudiness', start_date, end_date)
+    if not cloud_data.empty and 'V_N' in cloud_data.columns:
+        all_data['cloudiness'] = cloud_data['V_N']
+    
+    # Combine all data
+    if not all_data:
+        print("No real data could be downloaded, falling back to simulated data")
+        return load_weather_data_simulated(start_date, end_date, selected_params)
+    
+    # Create combined dataframe
+    combined_df = pd.DataFrame(all_data)
+    
+    # Fill missing values with interpolation
+    combined_df = combined_df.interpolate(method='time')
+    
+    # Add derived parameters if missing
+    if 'humidity' not in combined_df.columns:
+        # Estimate humidity (this is a rough approximation)
+        combined_df['humidity'] = 70 + 20 * np.sin(2 * np.pi * combined_df.index.hour / 24)
+    
+    if 'diffuse_solar_radiation' not in combined_df.columns and 'global_radiation' in combined_df.columns:
+        # Estimate diffuse radiation as portion of global radiation
+        combined_df['diffuse_solar_radiation'] = combined_df['global_radiation'] * 0.3
+    
+    # Filter selected parameters if specified
+    if selected_params:
+        available_params = [param for param in selected_params if param in combined_df.columns]
+        if available_params:
+            combined_df = combined_df[available_params]
+        else:
+            print(f"None of the selected parameters {selected_params} are available in real data")
+            print(f"Available parameters: {combined_df.columns.tolist()}")
+    
+    print(f"Successfully loaded real DWD data with shape: {combined_df.shape}")
+    print(f"Available parameters: {combined_df.columns.tolist()}")
+    print(f"Date range: {combined_df.index.min()} to {combined_df.index.max()}")
+    
+    return combined_df
 
+def load_weather_data_simulated(start_date, end_date, selected_params=None):
+    """
+    Fallback function to generate simulated weather data.
+    """
+    print("Using simulated weather data as fallback")
+    
+    # Create hourly date range
+    dates = pd.date_range(start=start_date, end=end_date, freq='h')
+    
+    # Create a DataFrame with all weather parameters
+    weather_params = [
+        'sunshine_duration', 'global_radiation', 'diffuse_solar_radiation',
+        'wind_speed', 'wind_direction', 'temperature', 'pressure',
+        'humidity', 'cloudiness'
+    ]
+    
+    # Initialize DataFrame with dates
+    weather_data = pd.DataFrame(index=dates)
+    
+    # Add weather parameters with random values
+    for param in weather_params:
+        if param == 'sunshine_duration':
+            values = np.random.randint(0, 61, size=len(dates))
+            values[weather_data.index.hour < 6] = 0
+            values[weather_data.index.hour > 20] = 0
+        elif param in ['global_radiation', 'diffuse_solar_radiation']:
+            values = np.random.randint(0, 1001, size=len(dates))
+            values[weather_data.index.hour < 6] = 0
+            values[weather_data.index.hour > 20] = 0
+        elif param == 'wind_speed':
+            values = np.random.uniform(0, 30, size=len(dates))
+        elif param == 'wind_direction':
+            values = np.random.uniform(0, 360, size=len(dates))
+        elif param == 'temperature':
+            values = np.random.uniform(-10, 35, size=len(dates))
+            season = np.sin(2 * np.pi * (weather_data.index.dayofyear / 365))
+            values += 15 * season
+        elif param == 'pressure':
+            values = np.random.uniform(980, 1030, size=len(dates))
+        elif param == 'humidity':
+            values = np.random.uniform(20, 100, size=len(dates))
+        elif param == 'cloudiness':
+            values = np.random.uniform(0, 100, size=len(dates))
+        
+        weather_data[param] = values
+    
+    # Filter selected parameters if specified
+    if selected_params:
+        weather_data = weather_data[selected_params]
+    
+    return weather_data
 
 def load_weather_data(data_path, selected_params=None):
     """

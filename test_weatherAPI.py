@@ -25,8 +25,8 @@ def test_weather_data_loading():
     lon = 13.405
     end_date = datetime.now()
     start_date = end_date - timedelta(days=30)
-    selected_params = ['temperature', 'wind_speed', 'global_radiation']
-    
+    selected_params = ['temperature', 'wind_speed', 'global_radiation', 'sunshine_duration']
+
     # Test real data loading
     print("\nTesting real DWD data loading...")
     try:
@@ -42,7 +42,7 @@ def test_weather_data_loading():
         print(f"Real weather data shape: {weather_data_real.shape}")
         print(f"Date range: {weather_data_real.index.min()} to {weather_data_real.index.max()}")
         print(f"Available parameters: {weather_data_real.columns.tolist()}")
-        
+        weather_data_real.to_csv('weather_data_real.csv')
         # Plot temperature if available
         if 'temperature' in weather_data_real.columns:
             plt.figure(figsize=(12, 6))

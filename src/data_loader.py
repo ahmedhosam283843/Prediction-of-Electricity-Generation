@@ -15,6 +15,11 @@ from sklearn.preprocessing import StandardScaler
 import torch
 from torch.utils.data import Dataset, DataLoader
 from datetime import datetime, timedelta
+import requests
+from io import StringIO
+import zipfile
+from datetime import datetime, timedelta
+import warnings
 
 # Import CodeGreen API for real data
 try:
@@ -65,6 +70,55 @@ class TimeSeriesDataset(Dataset):
         y = self.target[y_start:y_end]
         
         return torch.FloatTensor(x), torch.FloatTensor(y)
+
+def get_dwd_stations():
+    """
+    Get list of DWD weather stations.
+    
+    Returns:
+        pd.DataFrame: DataFrame with station information
+    """
+    # DWD station list URL (for hourly data)
+    station_url = "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/air_temperature/recent/TU_Stundenwerte_Beschreibung_Stationen.txt"
+    
+    try:
+        response = requests.get(station_url, timeout=30)
+        response.raise_for_status()
+        
+        # Parse the station data (fixed-width format)
+        lines = response.text.split('\n')[2:]  # Skip header lines
+        stations = []
+        
+        for line in lines:
+            if len(line.strip()) > 0:
+                # Parse fixed-width format
+                try:
+                    station_id = line[0:5].strip()
+                    start_date = line[6:14].strip()
+                    end_date = line[15:23].strip()
+                    height = line[24:38].strip()
+                    lat = line[39:50].strip()
+                    lon = line[51:60].strip()
+                    name = line[61:].strip()
+                    
+                    if station_id and station_id.isdigit():
+                        stations.append({
+                            'station_id': station_id,
+                            'start_date': start_date,
+                            'end_date': end_date,
+                            'height': height,
+                            'lat': float(lat) if lat else None,
+                            'lon': float(lon) if lon else None,
+                            'name': name
+                        })
+                except (ValueError, IndexError):
+                    continue
+        
+        return pd.DataFrame(stations)
+    
+    except Exception as e:
+        print(f"Error fetching DWD stations: {e}")
+        return pd.DataFrame()
 
 def load_weather_data(data_path, selected_params=None):
     """

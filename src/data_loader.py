@@ -142,6 +142,112 @@ def find_nearest_station(lat, lon, stations_df):
     
     return stations_df.loc[nearest_idx, 'station_id']
 
+def download_dwd_data(station_id, parameter, start_date, end_date):
+    """
+    Download DWD data for a specific station and parameter.
+    
+    Args:
+        station_id (str): DWD station ID
+        parameter (str): Weather parameter
+        start_date (datetime): Start date
+        end_date (datetime): End date
+        
+    Returns:
+        pd.DataFrame: Weather data
+    """
+    # Parameter mapping to DWD URLs and file patterns
+    param_mapping = {
+        'temperature': {
+            'url_recent': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/air_temperature/recent/',
+            'url_historical': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/air_temperature/historical/',
+            'file_pattern': f'stundenwerte_TU_{station_id:0>5}_'
+        },
+        'solar': {
+            'url_recent': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/solar/',
+            'url_historical': None,  # Solar data only available recent
+            'file_pattern': f'stundenwerte_ST_{station_id:0>5}_'
+        },
+        'wind': {
+            'url_recent': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/wind/recent/',
+            'url_historical': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/wind/historical/',
+            'file_pattern': f'stundenwerte_FF_{station_id:0>5}_'
+        },
+        'pressure': {
+            'url_recent': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/pressure/recent/',
+            'url_historical': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/pressure/historical/',
+            'file_pattern': f'stundenwerte_P0_{station_id:0>5}_'
+        },
+        'cloudiness': {
+            'url_recent': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/cloudiness/recent/',
+            'url_historical': 'https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/hourly/cloudiness/historical/',
+            'file_pattern': f'stundenwerte_N_{station_id:0>5}_'
+        }
+    }
+    
+    if parameter not in param_mapping:
+        print(f"Parameter {parameter} not supported")
+        return pd.DataFrame()
+    
+    param_info = param_mapping[parameter]
+    station_id_str = f"{int(station_id):05d}"
+    
+    # Try recent data first
+    try:
+        data_url = param_info['url_recent']
+        response = requests.get(data_url, timeout=30)
+        response.raise_for_status()
+        
+        # Find the correct file
+        file_pattern = param_info['file_pattern']
+        files = [line for line in response.text.split('\n') if file_pattern in line and '.zip' in line]
+        
+        if not files:
+            print(f"No files found for station {station_id} and parameter {parameter}")
+            return pd.DataFrame()
+        
+        # Get the most recent file
+        zip_file = files[-1].split('"')[1] if '"' in files[-1] else files[-1].split()[-1]
+        zip_url = data_url + zip_file
+        
+        # Download and extract the zip file
+        zip_response = requests.get(zip_url, timeout=60)
+        zip_response.raise_for_status()
+        
+        # Extract CSV from zip
+        with zipfile.ZipFile(StringIO(zip_response.content.decode('latin-1')), 'r') as zip_ref:
+            csv_files = [f for f in zip_ref.namelist() if f.endswith('.txt')]
+            if not csv_files:
+                print(f"No CSV files found in zip for station {station_id}")
+                return pd.DataFrame()
+            
+            csv_content = zip_ref.read(csv_files[0]).decode('latin-1')
+            
+        # Parse CSV data
+        df = pd.read_csv(StringIO(csv_content), sep=';', skipinitialspace=True)
+        
+        # Clean up the dataframe
+        if 'MESS_DATUM' in df.columns:
+            # Convert timestamp
+            df['MESS_DATUM'] = pd.to_datetime(df['MESS_DATUM'], format='%Y%m%d%H', errors='coerce')
+            df = df.set_index('MESS_DATUM')
+            
+            # Filter by date range
+            df = df[(df.index >= start_date) & (df.index <= end_date)]
+            
+            # Replace -999 (missing values) with NaN
+            df = df.replace(-999, np.nan)
+            
+            return df
+        else:
+            print(f"MESS_DATUM column not found in data for station {station_id}")
+            return pd.DataFrame()
+            
+    except Exception as e:
+        print(f"Error downloading data for station {station_id}, parameter {parameter}: {e}")
+        return pd.DataFrame()
+
+
+
 def load_weather_data(data_path, selected_params=None):
     """
     Load weather data from DWD.

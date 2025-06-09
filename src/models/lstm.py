@@ -30,19 +30,9 @@ class LSTMModel(nn.Module):
         
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        
-        # LSTM layers
-        self.lstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
-        )
-        
-        # Fully connected output layer
-        self.fc = nn.Linear(hidden_dim, output_dim)
-        
+        self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, num_layers=num_layers,
+                            batch_first=True, dropout=dropout, bidirectional=True)
+        self.fc = nn.Linear(hidden_dim * 2, output_dim)  # *2 for bidirectional
     def forward(self, x):
         """
         Forward pass through the network.

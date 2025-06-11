@@ -43,9 +43,9 @@ class LSTMModel(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, output_dim)
         """
-        # Initialize hidden state and cell state
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).to(x.device)
+        # Initialize hidden state and cell state for bidirectional LSTM
+        h0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_dim).to(x.device)
+        c0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_dim).to(x.device)
         
         # Forward propagate LSTM
         # out shape: (batch_size, seq_len, hidden_dim)

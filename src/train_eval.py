@@ -18,6 +18,7 @@ from pathlib import Path
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from src.models.cycle_lstm import CycleLSTMModel
 from src.config import DEVICE, LR, EPOCHS
+from tslearn.metrics import SoftDTWLossPyTorch
 
 def train_model(model, train_loader, val_loader, epochs, device):
     """Train the PyTorch model"""
@@ -95,9 +96,11 @@ def evaluate_model(model, test_loader, device):
     model.eval()
     criterion = nn.MSELoss()
     mae_criterion = nn.L1Loss()
-    
+    sdtw_criterion = SoftDTWLossPyTorch(gamma=0.1).to(device)
+
     total_mse = 0.0
     total_mae = 0.0
+    total_sdtw = 0.0
     total_samples = 0
     all_predictions = []
     all_targets = []
@@ -106,14 +109,15 @@ def evaluate_model(model, test_loader, device):
         for batch_x, batch_y in test_loader:
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
-            
             outputs = model(batch_x)
-            
             mse = criterion(outputs, batch_y)
             mae = mae_criterion(outputs, batch_y)
+            # SDTW expects 3D tensors: [batch, length, 1]
+            sdtw = sdtw_criterion(outputs.unsqueeze(-1), batch_y.unsqueeze(-1)).mean()
             
             total_mse += mse.item() * batch_x.size(0)
             total_mae += mae.item() * batch_x.size(0)
+            total_sdtw += sdtw.item() * batch_x.size(0)
             total_samples += batch_x.size(0)
             
             all_predictions.append(outputs.cpu().numpy())
@@ -121,12 +125,12 @@ def evaluate_model(model, test_loader, device):
     
     avg_mse = total_mse / total_samples
     avg_mae = total_mae / total_samples
+    avg_sdtw = total_sdtw / total_samples
     
     predictions = np.vstack(all_predictions)
     targets = np.vstack(all_targets)
     
-    return avg_mse, avg_mae, predictions, targets
-
+    return avg_mse, avg_mae, avg_sdtw, predictions, targets
 def plot_predictions(predictions, targets, times,
                      horizon: int, model_name: str,
                      save_dir: str | None = None, num_points: int = 900):

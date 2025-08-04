@@ -31,7 +31,3 @@ If you use this code, please cite the original paper:
 "Prediction of Electricity Generation Using Onshore Wind and Solar Energy in Germany"
 MDPI Energies, 2023
 ```
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.

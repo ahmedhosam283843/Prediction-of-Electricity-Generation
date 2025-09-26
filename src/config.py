@@ -55,3 +55,14 @@ COUNTRY_COORDS = {
 }
 
 LAT, LON = COUNTRY_COORDS.get(COUNTRY, COUNTRY_COORDS["DE"])
+
+# ---------------- Carbon emissions configuration ----------------
+DEFAULT_SERVER = dict(
+    country=COUNTRY,
+    number_core=8,
+    memory_gb=32,
+    power_draw_core=15.8,  # W / core  (Green-Algorithms defaults)
+    usage_factor_core=1.0,
+    power_draw_mem=0.3725,  # W / GiB
+    power_usage_efficiency=1.6,
+)

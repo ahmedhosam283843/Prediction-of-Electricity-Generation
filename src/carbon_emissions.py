@@ -22,21 +22,11 @@ import numpy as np
 
 # --- bridge to the framework ---------------------------------------------------
 from codegreen_core.tools.carbon_intensity import compute_ci
-from .config import COUNTRY as CFG_COUNTRY
+from .config import COUNTRY as CFG_COUNTRY, DEFAULT_SERVER
 # ------------------------------------------------------------------------------
 
 # ───────────────────────────── configuration & defaults ────────────────────────
 AVG_CI_G_PER_KWH = 400.0          # proxy used only as last resort
-
-DEFAULT_SERVER = dict(
-    country=CFG_COUNTRY,
-    number_core=8,
-    memory_gb=32,
-    power_draw_core=15.8,  # W / core  (Green-Algorithms defaults)
-    usage_factor_core=1.0,
-    power_draw_mem=0.3725,  # W / GiB
-    power_usage_efficiency=1.6,
-)
 
 # ───────────────────────── internal helpers ────────────────────────────────────
 _CI_GLOBAL: pd.DataFrame | None = None          # will hold the big CI curve

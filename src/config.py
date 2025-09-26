@@ -1,10 +1,15 @@
 import os
 import torch
+from datetime import datetime
 
 SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-LOOKBACK_HOURS = 300
+# Data date range
+START_DATE = datetime(2021, 8, 13)
+END_DATE = datetime(2025, 8, 12)
+
+LOOKBACK_HOURS = 72
 HORIZON_HOURS = 72
 VAL_FRAC = 0.15
 TEST_FRAC = 0.15
@@ -16,13 +21,14 @@ SELECTED_WEATHER_VARS = [
     "temperature", "wind_speed", "pressure",
     "global_radiation", "humidity", "cloudiness"
 ]
-TIME_FEATURES = ["hr_sin","hr_cos","wkd_sin","wkd_cos","doy_sin","doy_cos"]
+TIME_FEATURES = ["hr_sin", "hr_cos",
+                 "wkd_sin", "wkd_cos", "doy_sin", "doy_cos"]
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
 MAX_PAST_DAYS_FORECAST = 92    # API limit
-CHUNK_LENGTH_FORECAST   = 16    # ≤16 days per request
+CHUNK_LENGTH_FORECAST = 16    # ≤16 days per request
 
 # ---------------- Country configuration ----------------
 COUNTRY = "DE"
@@ -48,4 +54,4 @@ COUNTRY_COORDS = {
     "CH": (46.9480, 7.4474),   # Bern
 }
 
-LAT, LON = COUNTRY_COORDS.get(COUNTRY, COUNTRY_COORDS["DE"]) 
+LAT, LON = COUNTRY_COORDS.get(COUNTRY, COUNTRY_COORDS["DE"])

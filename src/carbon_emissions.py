@@ -63,8 +63,8 @@ def _ci_span(country: str, span_start_iso: str, span_end_iso: str) -> pd.DataFra
     """
     df = compute_ci(
         country,
-        pd.Timestamp(span_start_iso),
-        pd.Timestamp(span_end_iso)
+        pd.Timestamp(span_start_iso).tz_localize(None),
+        pd.Timestamp(span_end_iso).tz_localize(None)
     )
     if not pd.api.types.is_datetime64_any_dtype(df["startTimeUTC"]):
         df["startTimeUTC"] = pd.to_datetime(df["startTimeUTC"], utc=True)
@@ -93,6 +93,8 @@ def _slice_ci(start_ts: pd.Timestamp, runtime_h: int, country: str) -> pd.DataFr
 def _integrate_ci(ci_df: pd.DataFrame, server: dict) -> float:
     """
     Integrate CI × energy → kg CO₂ for the given window (ci_df already sliced).
+    The CI data is hourly (g/kWh), so multiplying by the constant power draw (kW)
+    and summing over the hours gives the total grams of CO₂.
     """
     kw = _task_kw(server)
     # grams per hour = ci[g/kWh] * kW
@@ -161,7 +163,8 @@ def carbon_plot_single(pred_renew: np.ndarray,
                        country: str | None = None,
                        server: dict = DEFAULT_SERVER,
                        cei0: float = AVG_CI_G_PER_KWH,
-                       true_renew: np.ndarray | None = None):
+                       true_renew: np.ndarray | None = None,
+                       model_name: str = "model") -> tuple:
 
     server = dict(DEFAULT_SERVER | server)
     server["country"] = country or server.get("country") or CFG_COUNTRY
@@ -169,17 +172,15 @@ def carbon_plot_single(pred_renew: np.ndarray,
     H = len(pred_renew)
     t_idx = pd.date_range(start=start_ts, periods=H, freq="h")
 
-    k = runtime_h
-    w = np.ones(k) / k
-    avg_ren_pred = np.convolve(pred_renew, w, mode="valid")
-    proxy_ci_pred = cei0 * (1 - avg_ren_pred)
+    # Use the forecast to find the best *index*
+    w = np.ones(runtime_h) / runtime_h
+    avg_ren_pred = np.convolve(
+        pred_renew, w, mode="valid") if pred_renew is not None else None
+    best_pred_i = _energy_best_idx(
+        avg_ren_pred, threshold) if avg_ren_pred is not None else 0
 
-    best_pred_i = _energy_best_idx(avg_ren_pred, threshold)
-
-    kg_now = _true_kg(
-        t_idx[0],           proxy_ci_pred[0],           runtime_h, server)
-    kg_pred = _true_kg(t_idx[best_pred_i],
-                       proxy_ci_pred[best_pred_i], runtime_h, server)
+    kg_now = _true_kg(t_idx[0], 0, runtime_h, server)
+    kg_pred = _true_kg(t_idx[best_pred_i], 0, runtime_h, server)
 
     # Oracle (optional, if ground-truth path is provided)
     best_true_i = None
@@ -187,10 +188,8 @@ def carbon_plot_single(pred_renew: np.ndarray,
     oracle_span = (None, None)
     if true_renew is not None and len(true_renew) == H:
         avg_ren_true = np.convolve(true_renew, w, mode="valid")
-        proxy_ci_true = cei0 * (1 - avg_ren_true)
         best_true_i = _energy_best_idx(avg_ren_true, threshold)
-        kg_oracle = _true_kg(t_idx[best_true_i], proxy_ci_true[best_true_i],
-                             runtime_h, server)
+        kg_oracle = _true_kg(t_idx[best_true_i], 0, runtime_h, server)
         oracle_span = (t_idx[best_true_i],
                        t_idx[best_true_i] + timedelta(hours=runtime_h))
 
@@ -204,17 +203,13 @@ def carbon_plot_single(pred_renew: np.ndarray,
     gs = fig.add_gridspec(1, 2, width_ratios=[3, 1], wspace=0.05)
     ax1 = fig.add_subplot(gs[0])
 
-    ax1.plot(t_idx, pred_renew * 100, lw=2, label="Predicted % renewable")
+    if pred_renew is not None:
+        ax1.plot(t_idx, pred_renew * 100, lw=2, label="Predicted % renewable")
     if true_renew is not None:
         ax1.plot(t_idx, true_renew * 100, lw=2,
                  ls='--', label="Actual % renewable")
     ax1.set_ylabel("% renewable")
     ax1.set_ylim(0, 100)
-
-    ax2 = ax1.twinx()
-    ax2.set_ylabel("kg CO₂ for runtime")
-    ax2.set_ylim(0, max(kg_now, kg_pred, kg_oracle or 0) * 1.25)
-    ax2.bar(t_idx[0], kg_now, width=.04, label="Start now")
 
     fc_start = t_idx[best_pred_i]
     fc_end = fc_start + timedelta(hours=runtime_h)
@@ -237,12 +232,12 @@ def carbon_plot_single(pred_renew: np.ndarray,
              f"Energy-max (forecast): {kg_pred:.2f} kg"]
     if kg_oracle is not None:
         lines.append(f"Energy-max (target):   {kg_oracle:.2f} kg")
-    ax_box.text(0.21, 0.98, "\n".join(lines),
+    ax_box.text(0.05, 0.98, "\n".join(lines),
                 ha="left", va="top", family="monospace", fontsize=8)
 
     ax1.set_xlabel("Time")
     ax1.set_title(
-        f"Optimal energy window ({runtime_h} h — {server['country']})")
+        f"Optimal energy window ({runtime_h} h — {server['country']})\nModel: {model_name}")
     ax1.grid(ls="--", alpha=.3)
     ax1.legend(fontsize=8)
     fig.autofmt_xdate()
@@ -337,8 +332,17 @@ def scheduler_metrics(pred_renew: np.ndarray,
                              runtime_h, server)
         saved_kg_oracle = kg_now - kg_oracle
         saved_pct_oracle = 100.0 * saved_kg_oracle / max(kg_now, 1e-9)
-        if saved_kg_oracle > 1e-9:
+
+        # Attainment: how much of the possible savings did the model achieve?
+        # Capped to handle edge cases where oracle savings are negative.
+        if saved_kg_pred < 0:
+            attainment = 0.0  # Model lost energy, so 0% attainment.
+        elif saved_kg_oracle <= 1e-9:
+            # No potential savings, but model saved energy. Cap at 100%.
+            attainment = 100.0
+        else:  # Both saved_kg_pred and saved_kg_oracle are positive.
             attainment = 100.0 * saved_kg_pred / saved_kg_oracle
+
         regret_kg = kg_pred - kg_oracle
         overlap_h = max(0, runtime_h - abs(best_pred_i - best_true_i))
 

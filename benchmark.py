@@ -81,10 +81,6 @@ def set_seed(seed: int = 42):
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
-
 
 
 # benchmark.py
@@ -518,13 +514,19 @@ def summarize_scheduler(y_pred: np.ndarray,
     exact_match = float(
         (df["pred_start_idx"] == df["oracle_start_idx"]).mean() * 100.0)
 
+    # Correctly calculate overall saved percentage from aggregate kgs
+    total_saved_kg = df["saved_kg_pred"].sum()
+    total_kg_now = df["kg_now"].sum()
+    overall_saved_pct = 100.0 * total_saved_kg / max(total_kg_now, 1e-9)
+
     summary = dict(
         model=model_name,
         N=len(df),
         runtime_h=runtime_h,
-        threshold=threshold,
-        avg_saved_kg=float(df["saved_kg_pred"].mean()),
-        avg_saved_pct=float(df["saved_pct_pred"].mean()),
+        threshold=threshold,  # The threshold used to find the window
+        avg_saved_kg=float(df["saved_kg_pred"].mean()
+                           ),  # True average kg saved
+        avg_saved_pct=float(overall_saved_pct),  # Corrected overall percentage
         avg_attainment_pct=float(df["attainment_pct"].mean()),
         threshold_hit_rate_pred=float(df["thr_met_pred"].mean() * 100.0),
         avg_overlap_h=float(df["overlap_h"].mean()),
@@ -899,7 +901,7 @@ def main():
     )[:2]
 
     start_ts = pd.to_datetime(data["Tte"][-1, 0])
-    start_ts_earlier = start_ts - timedelta(days=7)
+    start_ts_earlier = start_ts - timedelta(days=30)
     true_last = y_true_ref[-1]  # ground truth path for last test sample
 
     def _save_window_plot(model_name: str):
@@ -911,21 +913,33 @@ def main():
             start_ts=start_ts,
             runtime_h=8,
             threshold=0.7,
-            country=COUNTRY
+            country=COUNTRY,
+            model_name=model_name
         )
         fig.savefig(os.path.join(
             out_dir, f"{model_name}_optimal_window.png"), dpi=300)
 
+        # Find the index for the sample 30 days earlier
+        idx_earlier = np.where(data["Tte"][:, 0] ==
+                               np.datetime64(start_ts_earlier))[0]
+        if len(idx_earlier) > 0:
+            pred_earlier = model_preds[model_name][idx_earlier[0]]
+            true_earlier = y_true_ref[idx_earlier[0]]
+        else:
+            pred_earlier = pred_last
+            true_earlier = true_last
+
         fig2, _, _ = carbon_plot_single(
-            pred_renew=pred_last,
-            true_renew=true_last,
+            pred_renew=pred_earlier,
+            true_renew=true_earlier,
             start_ts=start_ts_earlier,
             runtime_h=8,
             threshold=0.7,
-            country=COUNTRY
+            country=COUNTRY,
+            model_name=model_name + " (30 days earlier)"
         )
         fig2.savefig(os.path.join(
-            out_dir, f"{model_name}_optimal_window_week_earlier.png"), dpi=300)
+            out_dir, f"{model_name}_optimal_window_month_earlier.png"), dpi=300)
 
     for r in base_sorted:
         if r["model"] in model_preds:

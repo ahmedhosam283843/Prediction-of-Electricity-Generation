@@ -17,6 +17,7 @@ from src.models.cnn_lstm import CNNLSTMModel
 from src.models.tcn import TCNForecaster
 from src.models.gru import GRUForecaster
 from src.models.lstm import LSTMForecaster
+from src.models.transformer import TransformerEncoderForecaster
 from src.train_eval import train_model, evaluate_model, plot_predictions
 from src.data_loader import fetch_and_prepare, build_sequences
 
@@ -307,59 +308,6 @@ def train_and_eval_cycle_lstm(model, loaders, device):
                         infer_ms_per_sample=float(infer_ms_per_sample),
                         scaled_mse=None, scaled_mae=None, scaled_soft_dtw=None))  # No longer scaled
     return metrics, y_pred, y_true
-
-
-# ---------------- TransformerEncoder forecaster (lightweight, no external deps) ----------------
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 4000):
-        super().__init__()
-        self.drop = nn.Dropout(dropout)
-        pe = torch.zeros(max_len, d_model)  # (L, D)
-        position = torch.arange(
-            0, max_len, dtype=torch.float32).unsqueeze(1)  # (L,1)
-        div_term = torch.exp(torch.arange(
-            0, d_model, 2).float() * (-np.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)  # even
-        pe[:, 1::2] = torch.cos(position * div_term)  # odd
-        self.register_buffer("pe", pe)
-
-    def forward(self, x):  # x: (L, B, D)
-        L = x.size(0)
-        x = x + self.pe[:L].unsqueeze(1)
-        return self.drop(x)
-
-
-class TransformerEncoderForecaster(nn.Module):
-    def __init__(self, input_dim: int, horizon: int,
-                 d_model: int = 128, nhead: int = 4,
-                 num_layers: int = 2, dim_feedforward: int = 256,
-                 dropout: float = 0.1):
-        super().__init__()
-        self.proj = nn.Linear(input_dim, d_model)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-            dropout=dropout, batch_first=False, activation="relu"
-        )
-        self.encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_layers)
-        self.pe = PositionalEncoding(d_model, dropout=dropout)
-        self.head = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, horizon)
-        )
-
-    def forward(self, x):  # x: (B, L, F)
-        x = self.proj(x)     # (B, L, D)
-        x = x.transpose(0, 1)  # (L, B, D)
-        x = self.pe(x)
-        z = self.encoder(x)  # (L, B, D)
-        z_last = z[-1]       # (B, D)
-        out = self.head(z_last)  # (B, H)
-        return out
-
 
 # ---------------- XGBoost full 72-h path ----------------
 

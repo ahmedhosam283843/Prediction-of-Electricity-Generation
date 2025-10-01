@@ -1,10 +1,3 @@
-"""
-ARIMA model implementation for wind and solar energy prediction.
-
-This module implements the Autoregressive Integrated Moving Average (ARIMA) model
-as described in the paper "Prediction of Electricity Generation Using Onshore Wind and Solar Energy in Germany".
-"""
-
 import numpy as np
 import pandas as pd
 from statsmodels.tsa.arima.model import ARIMA

@@ -1,99 +1,142 @@
+from __future__ import annotations
+from typing import Optional
 import numpy as np
-from torch import nn
 import torch
+from torch import nn
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 4000):
+    """
+    Fixed sinusoidal positional encoding, added to sequence embeddings.
+    """
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 4000) -> None:
+        """
+        Args:
+            d_model: Embedding dimension.
+            dropout: Dropout probability applied after adding positional encoding.
+            max_len: Maximum supported sequence length.
+        """
         super().__init__()
         self.drop = nn.Dropout(dropout)
         pe = torch.zeros(max_len, d_model)  # (L, D)
-        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)  # (L,1)
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)  # (L, 1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)  # even
-        pe[:, 1::2] = torch.cos(position * div_term)  # odd
+        pe[:, 0::2] = torch.sin(position * div_term)  # even indices
+        pe[:, 1::2] = torch.cos(position * div_term)  # odd indices
         self.register_buffer("pe", pe)
 
-    def forward(self, x):  # x: (L, B, D)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Add positional encoding.
+
+        Args:
+            x: Input of shape (L, B, D).
+
+        Returns:
+            Tensor of shape (L, B, D).
+        """
         L = x.size(0)
         x = x + self.pe[:L].unsqueeze(1)
         return self.drop(x)
-    
-class InformerForecaster(nn.Module):
 
+
+class InformerForecaster(nn.Module):
     """
-    Lightweight Informer-style forecaster suitable for benchmarking.
-    This is NOT a full ProbSparse-Informer research implementation — instead it:
-      - projects inputs to a d_model,
-      - optionally performs one Conv1d-based distillation/downsampling,
-      - uses a TransformerEncoder (stacked) to produce sequence features,
-      - pools the final encoder outputs (last token) and uses a small MLP head to predict the H-step horizon.
-    This keeps the same input/output interface as other models in the codebase:
-      ctor(input_dim, horizon, d_model=128, ...)
-      forward(x) -> (B, H)
+    Lightweight Informer-style forecaster for time series.
+    - Projects inputs to d_model
+    - Optionally performs Conv1d-based temporal distillation (downsampling)
+    - Uses a standard TransformerEncoder stack
+    - Pools the last token and predicts the horizon via an MLP head
+
+    Input/Output:
+      - forward expects x of shape (B, L, F)
+      - returns predictions of shape (B, H)
     """
-    def __init__(self,
-                 input_dim: int,
-                 horizon: int,
-                 d_model: int = 128,
-                 nhead: int = 4,
-                 num_layers: int = 3,
-                 dim_feedforward: int = 256,
-                 dropout: float = 0.1,
-                 distill: bool = False):
+
+    def __init__(
+        self,
+        input_dim: int,
+        horizon: int,
+        d_model: int = 128,
+        nhead: Optional[int] = None,
+        num_layers: int = 3,
+        dim_feedforward: int = 256,
+        dropout: float = 0.1,
+        distill: bool = False,
+    ) -> None:
+        """
+        Args:
+            input_dim: Number of input features F.
+            horizon: Forecast horizon H (number of steps to predict).
+            d_model: Transformer embedding dimension.
+            nhead: Number of attention heads (if provided).
+            num_layers: Number of encoder layers.
+            dim_feedforward: Hidden dimension of the feedforward network.
+            dropout: Dropout probability.
+            distill: If True, apply a Conv1d-based downsampling in time (factor 2).
+        """
         super().__init__()
         self.horizon = horizon
         self.d_model = d_model
         self.distill = distill
+        self.nhead = nhead or 4  # default if not provided
 
-        # input projection
+        # Input projection to model dimension
         self.input_proj = nn.Linear(input_dim, d_model)
 
-        # optional distillation conv (downsample by factor 2)
-        if distill:
-            # conv expects (B, C, L) where C == d_model
-            self.distill_conv = nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1)
-        else:
-            self.distill_conv = None
+        # Optional distillation conv (downsample along time by stride=2)
+        self.distill_conv = (
+            nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1) if distill else None
+        )
 
-        # positional encoding (re-usable)
+        # Positional encoding
         self.pe = PositionalEncoding(d_model, dropout=dropout, max_len=4096)
 
-        # encoder (stacked TransformerEncoder layers)
+        # Transformer encoder stack
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
-            dropout=dropout, batch_first=False, activation="relu"
+            d_model=d_model,
+            nhead=self.nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=False,
+            activation="relu",
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        # head: MLP that maps pooled encoder features to horizon outputs
+        # MLP head mapping last token to horizon outputs
         self.head = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model, horizon)
+            nn.Linear(d_model, horizon),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        x: (B, L, F)
-        returns: (B, H)
+        Forward pass.
+
+        Args:
+            x: Input tensor of shape (B, L, F).
+
+        Returns:
+            Predictions of shape (B, H).
         """
-        # project -> (B, L, D)
+        # Project features to model dimension: (B, L, D)
         z = self.input_proj(x)
 
-        # optionally distill / downsample in the time axis
+        # Optional downsampling in time via Conv1d
         if self.distill_conv is not None:
-            # conv expects (B, C, L)
-            z = z.transpose(1, 2).contiguous()     # (B, D, L)
-            z = self.distill_conv(z)                # (B, D, L//2)
-            z = z.transpose(1, 2).contiguous()      # (B, L2, D)
+            # Conv1d expects (B, C, L) where C == D
+            z = z.transpose(1, 2).contiguous()  # (B, D, L)
+            z = self.distill_conv(z)            # (B, D, L//2)
+            z = z.transpose(1, 2).contiguous()  # (B, L2, D)
 
-        # transformer expects (L, B, D)
-        z = z.transpose(0, 1)  # (L, B, D)
-        z = self.pe(z)         # add pos enc + dropout
-        z_enc = self.encoder(z)  # (L, B, D)
+        # Transformer expects (L, B, D)
+        z = z.transpose(0, 1)            # (L, B, D)
+        z = self.pe(z)                   # add positional encoding + dropout
+        z_enc = self.encoder(z)          # (L, B, D)
 
-        # use last time-step representation (most recent encoded info)
-        z_last = z_enc[-1]  # (B, D)
-        out = self.head(z_last)  # (B, H)
+        # Use last time-step representation
+        z_last = z_enc[-1]               # (B, D)
+        out = self.head(z_last)          # (B, H)
         return out

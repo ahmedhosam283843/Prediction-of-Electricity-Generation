@@ -1,113 +1,117 @@
-"""
-ARIMA model implementation for wind and solar energy prediction.
-
-This module implements the Autoregressive Integrated Moving Average (ARIMA) model
-as described in the paper "Prediction of Electricity Generation Using Onshore Wind and Solar Energy in Germany".
-"""
-
+from __future__ import annotations
+from typing import Optional, Dict, Union, Any
 import numpy as np
 import pandas as pd
 from statsmodels.tsa.arima.model import ARIMA
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
+def _safe_mape(y_true: np.ndarray, y_pred: np.ndarray, eps: float = 1e-8) -> float:
+    """
+    Compute MAPE robustly, avoiding division by zero.
+
+    Args:
+        y_true: Ground truth values (shape: [n]).
+        y_pred: Predicted values (shape: [n]).
+        eps: Small epsilon to avoid division by zero.
+
+    Returns:
+        MAPE percentage as a float.
+    """
+    y_true = np.asarray(y_true).ravel()
+    y_pred = np.asarray(y_pred).ravel()
+    denom = np.where(np.abs(y_true) < eps, eps, y_true)
+    return float(np.mean(np.abs((y_true - y_pred) / denom)) * 100.0)
+
+
 class ARIMAModel:
     """
-    ARIMA model for time series forecasting.
-    
-    As described in the paper, this model serves as a baseline for comparison with
-    deep learning approaches.
+    ARIMA model for univariate time series forecasting.
+
+    This class wraps statsmodels' ARIMA to provide a consistent interface
+    with other forecasters used in the pipeline.
     """
-    def __init__(self, order=(1, 1, 1)):
+
+    def __init__(self, order: tuple[int, int, int] = (1, 1, 1)) -> None:
         """
         Initialize the ARIMA model.
-        
+
         Args:
-            order (tuple): ARIMA order parameters (p, d, q)
-                p: The number of lag observations included in the model (AR)
-                d: The number of times the raw observations are differenced (I)
-                q: The size of the moving average window (MA)
+            order: ARIMA order parameters (p, d, q), where:
+                p = autoregressive lags,
+                d = differences,
+                q = moving average terms.
         """
-        self.order = order
-        self.model = None
-        
-    def fit(self, train_data):
+        self.order = tuple(order)
+        self.model: Optional[ARIMA] = None
+        self.model_fit: Optional[Any] = None  # statsmodels ARIMAResults
+
+    def fit(self, train_data: Union[np.ndarray, pd.Series]) -> "ARIMAModel":
         """
         Fit the ARIMA model to the training data.
-        
+
         Args:
-            train_data (np.array): Training data time series
-            
+            train_data: 1D training time series (np.ndarray or pd.Series).
+
         Returns:
-            self: The fitted model
+            self
         """
-        # Convert to pandas Series for statsmodels
+        # Ensure pandas Series for statsmodels
         if not isinstance(train_data, pd.Series):
-            train_data = pd.Series(train_data)
-        
-        # Fit ARIMA model
+            train_data = pd.Series(np.asarray(train_data).ravel())
+
         self.model = ARIMA(train_data, order=self.order)
         self.model_fit = self.model.fit()
-        
         return self
-    
-    def predict(self, n_steps):
+
+    def predict(self, n_steps: int) -> np.ndarray:
         """
         Generate forecasts for future time steps.
-        
+
         Args:
-            n_steps (int): Number of steps to forecast
-            
+            n_steps: Number of steps to forecast into the future.
+
         Returns:
-            np.array: Forecasted values
+            Forecasted values as a numpy array (shape: [n_steps]).
         """
         if self.model_fit is None:
-            raise ValueError("Model must be fitted before making predictions")
-        
-        # Generate forecast
+            raise ValueError("Model must be fitted before making predictions.")
         forecast = self.model_fit.forecast(steps=n_steps)
-        
-        return forecast.values
-    
-    def evaluate(self, test_data, n_steps):
+        return np.asarray(forecast)
+
+    def evaluate(self, test_data: Union[np.ndarray, pd.Series], n_steps: int) -> Dict[str, float]:
         """
-        Evaluate the model on test data.
-        
+        Evaluate the model on test data using standard metrics.
+
         Args:
-            test_data (np.array): Test data time series
-            n_steps (int): Number of steps to forecast
-            
+            test_data: 1D test time series (np.ndarray or pd.Series).
+            n_steps: Number of steps to forecast and compare.
+
         Returns:
-            dict: Dictionary of evaluation metrics
+            Dictionary of evaluation metrics: mse, rmse, mae, mape.
         """
         if self.model_fit is None:
-            raise ValueError("Model must be fitted before evaluation")
-        
-        # Generate forecast
-        forecast = self.predict(n_steps)
-        
-        # Calculate metrics
-        mse = mean_squared_error(test_data[:n_steps], forecast)
-        rmse = np.sqrt(mse)
-        mae = mean_absolute_error(test_data[:n_steps], forecast)
-        mape = np.mean(np.abs((test_data[:n_steps] - forecast) / test_data[:n_steps])) * 100
-        
-        return {
-            'mse': mse,
-            'rmse': rmse,
-            'mae': mae,
-            'mape': mape
-        }
-    
-    def fit_predict(self, train_data, n_steps):
+            raise ValueError("Model must be fitted before evaluation.")
+
+        y_true = np.asarray(test_data).ravel()[:n_steps]
+        y_pred = self.predict(n_steps)
+
+        mse = mean_squared_error(y_true, y_pred)
+        rmse = float(np.sqrt(mse))
+        mae = mean_absolute_error(y_true, y_pred)
+        mape = _safe_mape(y_true, y_pred)
+
+        return {"mse": mse, "rmse": rmse, "mae": mae, "mape": mape}
+
+    def fit_predict(self, train_data: Union[np.ndarray, pd.Series], n_steps: int) -> np.ndarray:
         """
-        Fit the model and generate forecasts in one step.
-        
+        Convenience method to fit and forecast in one step.
+
         Args:
-            train_data (np.array): Training data time series
-            n_steps (int): Number of steps to forecast
-            
+            train_data: 1D training time series.
+            n_steps: Forecast horizon.
+
         Returns:
-            np.array: Forecasted values
+            Forecasted values (shape: [n_steps]).
         """
         self.fit(train_data)
         return self.predict(n_steps)

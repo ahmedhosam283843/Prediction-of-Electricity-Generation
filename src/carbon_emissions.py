@@ -1,32 +1,17 @@
 from __future__ import annotations
-from typing import Sequence  # only for type hints
-
+from typing import Sequence
 from matplotlib import pyplot as plt
-"""
-Fast carbon-emission helper used by benchmark.py.
-
-Key ideas
-─────────
-1.  Fetch the carbon-intensity (CI) curve of the whole evaluation span **once**
-    and keep it in memory (`set_global_ci`).
-2.  Every per-sample query then becomes a cheap Pandas slice + dot product
-    instead of an extra call to `compute_ci()`.
-3.  Fallback to the old behaviour (and, finally, to the 400 g proxy) if the
-    global curve was not provided.
-"""
 from datetime import timedelta
 from functools import lru_cache
 import warnings
 import pandas as pd
 import numpy as np
-
-# --- bridge to the framework ---------------------------------------------------
+import json
+import os
+from tqdm import tqdm
 from codegreen_core.tools.carbon_intensity import compute_ci
-from .config import COUNTRY as CFG_COUNTRY, DEFAULT_SERVER
-# ------------------------------------------------------------------------------
+from . import config as CFG
 
-# ───────────────────────────── configuration & defaults ────────────────────────
-AVG_CI_G_PER_KWH = 400.0          # proxy used only as last resort
 
 # ───────────────────────── internal helpers ────────────────────────────────────
 _CI_GLOBAL: pd.DataFrame | None = None          # will hold the big CI curve
@@ -47,7 +32,7 @@ def set_global_ci(df: pd.DataFrame):
 
 def _task_kw(server: dict) -> float:
     """kW drawn by the job (constant over time)."""
-    srv = DEFAULT_SERVER | server
+    srv = CFG.DEFAULT_SERVER | server
     watts = (
         srv["number_core"] * srv["power_draw_core"] * srv["usage_factor_core"]
         + srv["memory_gb"] * srv["power_draw_mem"]
@@ -115,7 +100,7 @@ def _true_kg_cached(ts_iso: str, runtime_h: int, srv_sig: tuple) -> float:
         warnings.warn(f"compute_ce failed – using 400 g proxy ({exc})",
                       RuntimeWarning, stacklevel=2)
         kw = _task_kw(srv)
-        return kw * runtime_h * AVG_CI_G_PER_KWH / 1_000.0   # kg
+        return kw * runtime_h * CFG.AVG_CI_G_PER_KWH / 1_000.0   # kg
 
 
 def _true_kg(ts: pd.Timestamp, _unused: float,
@@ -125,7 +110,7 @@ def _true_kg(ts: pd.Timestamp, _unused: float,
     """
     # allow callers to pass None → use default hardware spec
     if server is None:
-        server = DEFAULT_SERVER
+        server = CFG.DEFAULT_SERVER
 
     return _true_kg_cached(
         ts_iso=ts.isoformat(),
@@ -136,15 +121,6 @@ def _true_kg(ts: pd.Timestamp, _unused: float,
 
 # ───────────────────────────  API expected by benchmark  ───────────────────────
 CG_AVAILABLE = True        # informs benchmark that proper CI is available
-
-
-def precompute_emissions(*_, **__) -> int:
-    """No extra pre-compute needed once `set_global_ci()` is called."""
-    return 0
-
-
-def clear_emissions_cache():
-    _true_kg_cached.cache_clear()
 
 
 def _energy_best_idx(avg_ren: np.ndarray, threshold: float | None) -> int:
@@ -158,16 +134,15 @@ def _energy_best_idx(avg_ren: np.ndarray, threshold: float | None) -> int:
 # ───────────────────────────────────────── carbon_plot_single ──────────
 def carbon_plot_single(pred_renew: np.ndarray,
                        start_ts: pd.Timestamp,
-                       runtime_h: int = 8,
-                       threshold: float = .75,
+                       runtime_h: int = CFG.SCHEDULER_RUNTIME_H,
+                       threshold: float = CFG.SCHEDULER_THRESHOLD,
                        country: str | None = None,
-                       server: dict = DEFAULT_SERVER,
-                       cei0: float = AVG_CI_G_PER_KWH,
+                       server: dict = CFG.DEFAULT_SERVER,
                        true_renew: np.ndarray | None = None,
                        model_name: str = "model") -> tuple:
 
-    server = dict(DEFAULT_SERVER | server)
-    server["country"] = country or server.get("country") or CFG_COUNTRY
+    server = dict(CFG.DEFAULT_SERVER | server)
+    server["country"] = country or server.get("country") or CFG.COUNTRY
 
     H = len(pred_renew)
     t_idx = pd.date_range(start=start_ts, periods=H, freq="h")
@@ -245,24 +220,17 @@ def carbon_plot_single(pred_renew: np.ndarray,
     return fig, (fc_start, fc_end), oracle_span
 
 
-# ----------------------------------------------------------------------
-#  Remaining helpers (scheduling_stats, scheduler_metrics)
-#  – unchanged except they now call the cached _true_kg.
-# ----------------------------------------------------------------------
-
-
 def scheduling_stats(pred_renew: np.ndarray,
                      start_ts: pd.Timestamp,
-                     runtime_h: int = 8,
-                     thresholds: Sequence[float] = (.7, .75, .9),
-                     server: dict = DEFAULT_SERVER,
-                     cei0: float = AVG_CI_G_PER_KWH):
+                     runtime_h: int = CFG.SCHEDULER_RUNTIME_H,
+                     thresholds: Sequence[float] = CFG.SCHEDULER_THRESHOLDS,
+                     server: dict = CFG.DEFAULT_SERVER):
 
     H = len(pred_renew)
     t_idx = pd.date_range(start=start_ts, periods=H, freq="h")
     w = np.ones(runtime_h) / runtime_h
     avg_ren = np.convolve(pred_renew, w, mode="valid")
-    proxy_ci = cei0 * (1 - avg_ren)
+    proxy_ci = CFG.AVG_CI_G_PER_KWH * (1 - avg_ren)
 
     kg_now = _true_kg(t_idx[0], proxy_ci[0], runtime_h, server)
 
@@ -297,21 +265,20 @@ def scheduling_stats(pred_renew: np.ndarray,
 def scheduler_metrics(pred_renew: np.ndarray,
                       true_renew: np.ndarray | None,
                       start_ts: pd.Timestamp,
-                      runtime_h: int = 8,
-                      threshold: float = .75,
+                      runtime_h: int = CFG.SCHEDULER_RUNTIME_H,
+                      threshold: float = CFG.SCHEDULER_THRESHOLD,
                       country: str | None = None,
-                      server: dict = DEFAULT_SERVER,
-                      cei0: float = AVG_CI_G_PER_KWH) -> dict:
+                      server: dict = CFG.DEFAULT_SERVER) -> dict:
 
-    server = dict(DEFAULT_SERVER | server)
-    server["country"] = country or server.get("country") or CFG_COUNTRY
+    server = dict(CFG.DEFAULT_SERVER | server)
+    server["country"] = country or server.get("country") or CFG.COUNTRY
 
     H = len(pred_renew)
     t_idx = pd.date_range(start=start_ts, periods=H, freq="h")
     w = np.ones(runtime_h) / runtime_h
 
     avg_ren_pred = np.convolve(pred_renew, w, mode="valid")
-    proxy_ci_pred = cei0 * (1 - avg_ren_pred)
+    proxy_ci_pred = CFG.AVG_CI_G_PER_KWH * (1 - avg_ren_pred)
     best_pred_i = _energy_best_idx(avg_ren_pred, threshold)
 
     kg_now = _true_kg(
@@ -326,7 +293,7 @@ def scheduler_metrics(pred_renew: np.ndarray,
     saved_kg_oracle = saved_pct_oracle = attainment = overlap_h = regret_kg = None
     if true_renew is not None and len(true_renew) == H:
         avg_ren_true = np.convolve(true_renew, w, mode="valid")
-        proxy_ci_true = cei0 * (1 - avg_ren_true)
+        proxy_ci_true = CFG.AVG_CI_G_PER_KWH * (1 - avg_ren_true)
         best_true_i = _energy_best_idx(avg_ren_true, threshold)
         kg_oracle = _true_kg(t_idx[best_true_i], proxy_ci_true[best_true_i],
                              runtime_h, server)
@@ -373,3 +340,170 @@ def scheduler_metrics(pred_renew: np.ndarray,
         if avg_ren_true is not None else None,
         overlap_h=overlap_h
     )
+
+
+def summarize_scheduler(y_pred: np.ndarray,
+                        y_true: np.ndarray,
+                        Tte: np.ndarray,
+                        model_name: str,
+                        out_dir: str,
+                        runtime_h: int = CFG.SCHEDULER_RUNTIME_H,
+                        threshold: float = CFG.SCHEDULER_THRESHOLD,
+                        country: str = CFG.COUNTRY):
+    rows = []
+    for i in tqdm(range(len(y_pred)), desc=f"[{model_name}] scheduler", unit="sample"):
+        start_ts = pd.to_datetime(Tte[i, 0])
+        m = scheduler_metrics(
+            pred_renew=y_pred[i],
+            true_renew=y_true[i],
+            start_ts=start_ts,
+            runtime_h=runtime_h,
+            threshold=threshold,
+            country=country,
+        )
+        rows.append(m)
+    df = pd.DataFrame(rows)
+    os.makedirs(out_dir, exist_ok=True)
+    df.to_csv(os.path.join(
+        out_dir, f"{model_name}_scheduler_samples.csv"), index=False)
+
+    exact_match = float(
+        (df["pred_start_idx"] == df["oracle_start_idx"]).mean() * 100.0)
+    total_saved_kg = df["saved_kg_pred"].sum()
+    total_kg_now = df["kg_now"].sum()
+    overall_saved_pct = 100.0 * total_saved_kg / max(total_kg_now, 1e-9)
+
+    summary = dict(
+        model=model_name, N=len(df),
+        runtime_h=runtime_h, threshold=threshold,
+        avg_saved_kg=float(df["saved_kg_pred"].mean()),
+        avg_saved_pct=float(overall_saved_pct),
+        avg_attainment_pct=float(df["attainment_pct"].mean()),
+        threshold_hit_rate_pred=float(df["thr_met_pred"].mean() * 100.0),
+        avg_overlap_h=float(df["overlap_h"].mean()),
+        exact_match_rate_pct=exact_match,
+        avg_delay_h=float(df["pred_start_idx"].mean()),
+        avg_regret_kg=float(df["regret_kg"].mean()),
+    )
+    with open(os.path.join(out_dir, f"{model_name}_scheduler_summary.json"), "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"[scheduler] {model_name:>15} | saved {summary['avg_saved_kg']:.2f} kg "
+          f"({summary['avg_saved_pct']:.1f} %), attain {summary['avg_attainment_pct']:.1f} %, "
+          f"hit-rate {summary['threshold_hit_rate_pred']:.1f} %")
+    return df, summary
+
+
+def table_R2_last_sample(model_name: str,
+                         model_preds: dict[str, np.ndarray],
+                         y_true_ref: np.ndarray,
+                         Tte: np.ndarray,
+                         out_dir: str,
+                         runtime_h: int = CFG.SCHEDULER_RUNTIME_H,
+                         threshold: float = CFG.SCHEDULER_THRESHOLD):
+    i = len(y_true_ref) - 1
+    start_ts = pd.to_datetime(Tte[i, 0])
+    pred = model_preds[model_name][i]
+    true = y_true_ref[i]
+    df_sched = scheduling_stats(
+        pred_renew=pred, start_ts=start_ts, runtime_h=runtime_h,
+        thresholds=(threshold,), server=None,
+    )
+    m = scheduler_metrics(pred, true, start_ts, runtime_h,
+                          threshold, country=CFG.COUNTRY)
+    oracle_row = dict(
+        criterion="Energy-max (oracle)",
+        suggested_start=m["oracle_start_ts"],
+        avg_renew_pct=(m["avg_ren_true_win"] *
+                       100.0 if m["avg_ren_true_win"] is not None else None),
+        emissions_kg=m["kg_oracle"],
+        saved_kg=(m["kg_now"] - m["kg_oracle"]
+                  ) if m["kg_oracle"] is not None else None,
+        saved_pct=(100.0 * (m["kg_now"] - m["kg_oracle"]) /
+                   m["kg_now"]) if m["kg_oracle"] is not None else None
+    )
+    df_sched = pd.concat(
+        [df_sched, pd.DataFrame([oracle_row])], ignore_index=True)
+    os.makedirs(out_dir, exist_ok=True)
+    df_sched_path = os.path.join(out_dir, f"{model_name}_R2_last_sample.csv")
+    df_sched.to_csv(df_sched_path, index=False)
+    print(
+        f"[R2] Saved last-sample scheduling table for {model_name} → {df_sched_path}")
+
+
+def set_ci_from_test_span(Tte: np.ndarray, horizon_h: int, country: str):
+    span_start = pd.to_datetime(Tte[0, 0])
+    span_end = pd.to_datetime(Tte[-1, 0]) + timedelta(hours=horizon_h)
+    df = compute_ci(country, span_start, span_end)
+    set_global_ci(df)
+
+
+def run_scheduler_suite(model_preds: dict[str, np.ndarray], y_true_ref: np.ndarray, Tte, country: str, out_dir: str,
+                        runtime_h: int = CFG.SCHEDULER_RUNTIME_H, threshold: float = CFG.SCHEDULER_THRESHOLD):
+    print(
+        f"\n=== Scheduling metrics across test set (R={runtime_h}h, thr={threshold}) ===")
+    scheduler_summaries: list[dict] = []
+    for mname in model_preds:
+        df_sched, summary = summarize_scheduler(
+            y_pred=model_preds[mname],
+            y_true=y_true_ref,
+            Tte=Tte,
+            model_name=mname,
+            out_dir=out_dir,
+            runtime_h=runtime_h,
+            threshold=threshold,
+            country=country
+        )
+        scheduler_summaries.append(summary)
+        table_R2_last_sample(
+            model_name=mname,
+            model_preds=model_preds,
+            y_true_ref=y_true_ref,
+            Tte=Tte,
+            out_dir=out_dir,
+            runtime_h=runtime_h,
+            threshold=threshold
+        )
+    if scheduler_summaries:
+        with open(os.path.join(out_dir, "all_scheduler_summaries.json"), "w") as f:
+            json.dump(scheduler_summaries, f, indent=2)
+
+
+def save_optimal_window_plots(results: list[dict], model_preds: dict[str, np.ndarray], y_true_ref: np.ndarray,
+                              Tte, country: str, out_dir: str, runtime_h: int = CFG.SCHEDULER_RUNTIME_H, threshold: float = CFG.SCHEDULER_THRESHOLD):
+    base_sorted = sorted(
+        [r for r in results if r.get(
+            "mae_path") is not None and not r["model"].startswith("Ensemble_")],
+        key=lambda r: r["mae_path"]
+    )[:2]
+    ens_sorted = sorted(
+        [r for r in results if r.get(
+            "mae_path") is not None and r["model"].startswith("Ensemble_")],
+        key=lambda r: r["mae_path"]
+    )[:2]
+
+    start_ts = pd.to_datetime(Tte[-1, 0])
+    start_ts_earlier = start_ts - timedelta(days=30)
+    true_last = y_true_ref[-1]
+
+    def _save(model_name: str, when_ts: pd.Timestamp, pred: np.ndarray, true: np.ndarray, suffix: str):
+        fig, _, _ = carbon_plot_single(
+            pred_renew=pred, true_renew=true, start_ts=when_ts,
+            runtime_h=runtime_h, threshold=threshold, country=country, model_name=model_name + suffix
+        )
+        fname = f"{model_name}{'_month_earlier' if suffix else ''}_optimal_window.png"
+        fig.savefig(os.path.join(out_dir, fname), dpi=300)
+
+    for r in base_sorted + ens_sorted:
+        m = r["model"]
+        if m not in model_preds:
+            continue
+        pred_last = model_preds[m][-1]
+        _save(m, start_ts, pred_last, true_last, "")
+        idx_earlier = np.where(Tte[:, 0] == np.datetime64(start_ts_earlier))[0]
+        if len(idx_earlier) > 0:
+            pred_earlier = model_preds[m][idx_earlier[0]]
+            true_earlier = y_true_ref[idx_earlier[0]]
+        else:
+            pred_earlier, true_earlier = pred_last, true_last
+        _save(m, start_ts_earlier, pred_earlier,
+              true_earlier, " (30 days earlier)")

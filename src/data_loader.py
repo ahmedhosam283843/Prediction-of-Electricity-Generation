@@ -1,21 +1,13 @@
-# src/data_loader.py
 from pathlib import Path
-import os
-import pickle
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
-import torch
-from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import StandardScaler
 from datetime import datetime, timedelta
-import requests
 import warnings
-from .config import (
-    SELECTED_WEATHER_VARS, TIME_FEATURES,
-    ARCHIVE_URL, FORECAST_URL, MAX_PAST_DAYS_FORECAST, CHUNK_LENGTH_FORECAST,
-    COUNTRY, COUNTRY_COORDS, LAT, LON
-)
-
+import requests
+from .config import (SELECTED_WEATHER_VARS, TIME_FEATURES, ARCHIVE_URL,
+                     FORECAST_URL, MAX_PAST_DAYS_FORECAST, CHUNK_LENGTH_FORECAST, COUNTRY)
+from .utils import get_country_coords
 try:
     from codegreen_core.data import energy
     CODEGREEN_AVAILABLE = True
@@ -50,8 +42,7 @@ def load_weather_data(
 
     # default to config country coords
     if lat is None or lon is None:
-        lat = LAT
-        lon = LON
+        lat, lon = get_country_coords(country=COUNTRY)
 
     today_utc = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     oldest_forecast_ok = today_utc - timedelta(days=MAX_PAST_DAYS_FORECAST)
@@ -65,7 +56,8 @@ def load_weather_data(
     if recent_start <= end_date:
         cur = recent_start
         while cur <= end_date:
-            cur_end = min(cur + timedelta(days=CHUNK_LENGTH_FORECAST - 1), end_date)
+            cur_end = min(
+                cur + timedelta(days=CHUNK_LENGTH_FORECAST - 1), end_date)
             chunks.append(("forecast", cur, cur_end))
             cur = cur_end + timedelta(days=1)
 
@@ -100,7 +92,8 @@ def load_weather_data(
         try:
             resp.raise_for_status()
         except Exception as ex:
-            raise RuntimeError(f"[Open-Meteo] {kind} {s.date()}–{e.date()} failed: {ex}") from ex
+            raise RuntimeError(
+                f"[Open-Meteo] {kind} {s.date()}–{e.date()} failed: {ex}") from ex
 
         data = resp.json()
         if "hourly" not in data:
@@ -128,91 +121,66 @@ def load_weather_data(
             weather[p] = np.nan
 
     weather = weather.interpolate(method="time")
-    print(f"[Open-Meteo] got {weather.shape} rows ({weather.index.min()} → {weather.index.max()})")
+    print(
+        f"[Open-Meteo] got {weather.shape} rows ({weather.index.min()} → {weather.index.max()})")
     return weather
 
 
-def load_electricity_data_from_api(energy_type, start_date=None, end_date=None, country_code: str | None = None):
+def load_electricity_data(start_date: datetime | None = None, end_date: datetime | None = None, country: str | None = None):
+    """
+    Loads and caches electricity data (renewable percentage) from the CodeGreen API.
+    """
     if not CODEGREEN_AVAILABLE:
-        raise ImportError("codegreen_core package is not available")
+        raise ImportError(
+            "codegreen_core package is not available. Cannot load electricity data.")
 
     if start_date is None:
         start_date = datetime.now() - timedelta(days=60)
     if end_date is None:
         end_date = datetime.now()
-    if country_code is None:
-        country_code = COUNTRY
+
+    country_code = (country or COUNTRY).upper()
 
     # serve cached combined data per-country
-    if energy_type == "combined":
-        cache_file = _combined_cache_path(country_code, start_date, end_date)
-        if cache_file.exists():
-            print(f"[cache] {country_code} electricity {start_date.date()}–{end_date.date()} loaded")
-            return pd.read_pickle(cache_file), {}
+    cache_file = _combined_cache_path(country_code, start_date, end_date)
+    if cache_file.exists():
+        print(
+            f"[cache] {country_code} electricity {start_date.date()}–{end_date.date()} loaded")
+        return pd.read_pickle(cache_file)
 
-    data_type = "generation"
-    result = energy(country_code, start_date, end_date, data_type)
-    if not result.get("data_available", False):
-        err = result.get("error", "Unknown error")
-        raise ValueError(f"Data not available: {err}")
+    try:
+        result = energy(country_code, start_date, end_date, "generation")
+        if not result.get("data_available", False):
+            err = result.get("error", "Unknown error")
+            raise ValueError(f"Data not available from CodeGreen API: {err}")
 
-    df = result["data"]
-    columns = result.get("columns", {})
+        df = result["data"]
+        if not isinstance(df.index, pd.DatetimeIndex):
+            ts_col = next((c for c in [
+                          "startTime", "startTimeUTC", "time", "timestamp", "datetime"] if c in df.columns), None)
+            if ts_col:
+                df = df.set_index(pd.to_datetime(df[ts_col]))
+            else:
+                raise ValueError(
+                    "Cannot locate timestamp column in API response")
 
-    if not isinstance(df.index, pd.DatetimeIndex):
-        ts_col = next((c for c in ["startTime", "startTimeUTC", "time", "timestamp", "datetime"] if c in df.columns), None)
-        if ts_col:
-            df[ts_col] = pd.to_datetime(df[ts_col])
-            df = df.set_index(ts_col)
-        else:
-            raise ValueError("Cannot locate timestamp column in API response")
-
-    electricity_data = pd.DataFrame(index=df.index)
-
-    if energy_type == "combined":
-        required_cols = {"percentRenewable", "total"}
-        if required_cols.issubset(df.columns):
+        if "percentRenewable" in df.columns:
+            electricity_data = pd.DataFrame(index=df.index)
             electricity_data["percentRenewable"] = df["percentRenewable"] / 100.0
-            cache_file = _combined_cache_path(country_code, start_date, end_date)
             electricity_data.to_pickle(cache_file)
             print(f"[cache] saved → {cache_file.name}")
-        else:
-            raise ValueError(f"Columns {required_cols} missing in API response")
-
-    elif energy_type == "pv":
-        solar_col = next((c for c in ["Solar_per"] if c in df.columns), None)
-        if not solar_col:
-            raise ValueError("Solar generation data not found")
-        electricity_data["generation"] = df[solar_col]
-
-    elif energy_type == "wind":
-        wind_cols = [c for c in ["Wind_per"] if c in df.columns]
-        if not wind_cols:
-            raise ValueError("Wind generation data not found")
-        electricity_data["generation"] = df[wind_cols].sum(axis=1)
-
-    return electricity_data, columns
-
-
-def load_electricity_data(data_path, energy_type, start_date=None, end_date=None, country: str | None = None):
-    if CODEGREEN_AVAILABLE:
-        try:
-            electricity_data, _ = load_electricity_data_from_api(
-                energy_type, start_date, end_date, country_code=(country or COUNTRY)
-            )
-            if electricity_data.index.tz is None:
-                electricity_data.index = electricity_data.index.tz_localize('Europe/Berlin')
-                electricity_data.index = electricity_data.index.tz_convert('UTC').tz_localize(None)
-            print(f"Successfully loaded {energy_type} data from CodeGreen API ({country or COUNTRY})")
+            print(
+                f"Successfully loaded data from CodeGreen API ({country_code})")
             return electricity_data
-        except Exception as e:
-            print(f"Failed to load data from CodeGreen API: {str(e)}")
-            raise e
-    else:
-        raise ImportError("codegreen_core package is not available.")
+        else:
+            raise ValueError(
+                "Column 'percentRenewable' missing in API response")
+    except Exception as e:
+        print(f"Failed to load data from CodeGreen API: {str(e)}")
+        raise
 
 
-def preprocess_data(weather_data, electricity_data, selected_params=None):
+def merge_and_clean_data(weather_data, electricity_data, selected_params=None):
     if selected_params:
         weather_data = weather_data[selected_params]
     if len(weather_data) == 0:
@@ -225,18 +193,22 @@ def preprocess_data(weather_data, electricity_data, selected_params=None):
     if not isinstance(electricity_data.index, pd.DatetimeIndex):
         raise ValueError("Electricity data index must be a DatetimeIndex")
 
-    print(f"Weather data date range: {weather_data.index.min()} to {weather_data.index.max()}")
-    print(f"Electricity data date range: {electricity_data.index.min()} to {electricity_data.index.max()}")
+    print(
+        f"Weather data date range: {weather_data.index.min()} to {weather_data.index.max()}")
+    print(
+        f"Electricity data date range: {electricity_data.index.min()} to {electricity_data.index.max()}")
 
     if weather_data.index.tz is not None:
         print("Converting weather data timezone to UTC")
-        weather_data.index = weather_data.index.tz_convert('UTC').tz_localize(None)
+        weather_data.index = weather_data.index.tz_convert(
+            'UTC').tz_localize(None)
     else:
         print("Weather data index is naive; no timezone conversion applied")
 
     if electricity_data.index.tz is not None:
         print("Converting electricity data timezone to UTC")
-        electricity_data.index = electricity_data.index.tz_convert('UTC').tz_localize(None)
+        electricity_data.index = electricity_data.index.tz_convert(
+            'UTC').tz_localize(None)
     else:
         print("Electricity data index is naive; no timezone conversion applied")
 
@@ -244,40 +216,44 @@ def preprocess_data(weather_data, electricity_data, selected_params=None):
     assert electricity_data.index.tz is None
 
     print("After timezone conversion:")
-    print(f"Weather data date range: {weather_data.index.min()} to {weather_data.index.max()}")
-    print(f"Electricity data date range: {electricity_data.index.min()} to {electricity_data.index.max()}")
+    print(
+        f"Weather data date range: {weather_data.index.min()} to {weather_data.index.max()}")
+    print(
+        f"Electricity data date range: {electricity_data.index.min()} to {electricity_data.index.max()}")
 
     start_date = max(weather_data.index.min(), electricity_data.index.min())
     end_date = min(weather_data.index.max(), electricity_data.index.max())
     print(f"Overlapping date range: {start_date} to {end_date}")
     if start_date >= end_date:
-        raise ValueError("No overlapping data between weather and electricity datasets")
+        raise ValueError(
+            "No overlapping data between weather and electricity datasets")
 
     weather_data = weather_data.loc[start_date:end_date]
     electricity_data = electricity_data.loc[start_date:end_date]
-    merged_data = pd.merge(weather_data, electricity_data, left_index=True, right_index=True, how='inner')
+    merged_data = pd.merge(weather_data, electricity_data,
+                           left_index=True, right_index=True, how='inner')
     if len(merged_data) == 0:
         raise ValueError("No overlapping data after merging")
     if merged_data.isnull().sum().sum() > 0:
-        print(f"Found {merged_data.isnull().sum().sum()} missing values. Interpolating...")
+        print(
+            f"Found {merged_data.isnull().sum().sum()} missing values. Interpolating...")
         merged_data = merged_data.interpolate(method='time')
 
     return merged_data, {}
 
 
-def fetch_and_prepare(start: datetime, end: datetime, country: str | None = None):
+def load_and_engineer_features(start: datetime, end: datetime, country: str | None = None):
     """
     Returns merged & cleaned dataframe and the list of feature columns.
     Country and location are sourced from config by default.
     """
     country = (country or COUNTRY).upper()
-    lat, lon = COUNTRY_COORDS.get(country, (LAT, LON))
+    lat, lon = get_country_coords(country)
 
     weather = load_weather_data(selected_params=SELECTED_WEATHER_VARS,
-                                start_date=start, end_date=end,
-                                lat=lat, lon=lon)
+                                start_date=start, end_date=end, lat=lat, lon=lon)
 
-    elec_raw = load_electricity_data(None, "combined", start, end, country=country)
+    elec_raw = load_electricity_data(start, end, country=country)
 
     if {"renewableTotalWS", "total"}.issubset(elec_raw.columns):
         elec_raw["y"] = elec_raw["renewableTotalWS"]
@@ -286,13 +262,14 @@ def fetch_and_prepare(start: datetime, end: datetime, country: str | None = None
     else:
         raise RuntimeError("Could not build renewable-percentage target")
 
-    df, _ = preprocess_data(weather, elec_raw, selected_params=SELECTED_WEATHER_VARS)
+    df, _ = merge_and_clean_data(weather, elec_raw,
+                                 selected_params=SELECTED_WEATHER_VARS)
 
     hr, wkd, doy = df.index.hour, df.index.weekday, df.index.dayofyear
-    df["hr_sin"]  = np.sin(2*np.pi*hr / 24)
-    df["hr_cos"]  = np.cos(2*np.pi*hr / 24)
-    df["wkd_sin"] = np.sin(2*np.pi*wkd/ 7)
-    df["wkd_cos"] = np.cos(2*np.pi*wkd/ 7)
+    df["hr_sin"] = np.sin(2*np.pi*hr / 24)
+    df["hr_cos"] = np.cos(2*np.pi*hr / 24)
+    df["wkd_sin"] = np.sin(2*np.pi*wkd / 7)
+    df["wkd_cos"] = np.cos(2*np.pi*wkd / 7)
     df["doy_sin"] = np.sin(2*np.pi*doy/365.25)
     df["doy_cos"] = np.cos(2*np.pi*doy/365.25)
 
@@ -307,8 +284,8 @@ def build_sequences(df, lookback, horizon, include_y_hist: bool = False, y_hist_
       - y: (N, horizon)      future path
       - t: (N, horizon)      timestamps for the future window
     """
-    vals  = df.values.astype(np.float32)
-    n     = len(vals)
+    vals = df.values.astype(np.float32)
+    n = len(vals)
     feats = df.shape[1] - 1
     X, y, t = [], [], []
     for i in range(lookback, n - horizon + 1):
@@ -326,3 +303,67 @@ def build_sequences(df, lookback, horizon, include_y_hist: bool = False, y_hist_
         y.append(vals[i:i+horizon, -1])
         t.append(df.index.values[i:i+horizon])
     return np.asarray(X), np.asarray(y), np.asarray(t, dtype='datetime64[ns]')
+
+
+def create_modeling_datasets(start, end, lookback_hours, horizon_hours, val_frac, test_frac):
+    """
+    Prepare merged dataframe, build sequences, split chronologically with purge,
+    and scale features (fit on train only). Logic unchanged from main.py.
+    """
+    df, feat_cols = load_and_engineer_features(start, end)
+
+    # include past target channel
+    X, y, T = build_sequences(
+        df, lookback_hours, horizon_hours, include_y_hist=True, y_hist_k=lookback_hours
+    )
+
+    n = len(X)
+    test_cut = int(n * (1 - test_frac))
+    val_cut = int(test_cut * (1 - val_frac))
+    purge = max(horizon_hours - 1, 0)
+
+    tr_end = max(val_cut - purge, 0)
+    va_start = val_cut
+    va_end = max(test_cut - purge, va_start)
+    te_start = test_cut
+
+    if tr_end == 0 or va_end <= va_start or te_start >= n:
+        warnings.warn(
+            f"[split] Small/empty set after purge (n={n}, purge={purge}). "
+            f"Consider adjusting VAL_FRAC/TEST_FRAC or date range."
+        )
+
+    Xtr, ytr, Ttr = X[:tr_end], y[:tr_end], T[:tr_end]
+    Xva, yva, Tva = X[va_start:va_end], y[va_start:va_end], T[va_start:va_end]
+    Xte, yte, Tte = X[te_start:], y[te_start:], T[te_start:]
+
+    # scale X (fit on train)
+    scaler_X = StandardScaler().fit(Xtr.reshape(-1, Xtr.shape[-1]))
+    Xtr_sc = scaler_X.transform(
+        Xtr.reshape(-1, Xtr.shape[-1])).reshape(Xtr.shape)
+    Xva_sc = scaler_X.transform(
+        Xva.reshape(-1, Xva.shape[-1])).reshape(Xva.shape)
+    Xte_sc = scaler_X.transform(
+        Xte.reshape(-1, Xte.shape[-1])).reshape(Xte.shape)
+
+    # optional print (unchanged)
+    if len(Tte) > 0:
+        import pandas as pd
+        test_start_date = pd.to_datetime(Tte[0, 0])
+        test_end_date = pd.to_datetime(Tte[-1, -1])
+        print(
+            f"Test data from {test_start_date.date()} to {test_end_date.date()} (purge={purge})")
+    else:
+        print("[warn] No test samples after purge")
+
+    return dict(
+        df=df, feat_cols=feat_cols,
+        Xtr=Xtr_sc, Xva=Xva_sc, Xte=Xte_sc,
+        ytr=ytr, yva=yva, yte=yte,
+        Ttr=Ttr, Tva=Tva, Tte=Tte,
+        scaler_X=scaler_X, scaler_y=None
+    )
+
+
+def prepare_data(start, end, lookback_hours, horizon_hours, val_frac, test_frac):
+    return create_modeling_datasets(start, end, lookback_hours, horizon_hours, val_frac, test_frac)

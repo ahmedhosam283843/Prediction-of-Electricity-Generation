@@ -1,244 +1,379 @@
-"""
-Training and evaluation utilities for wind and solar energy prediction models.
-
-This module provides functions for training, evaluating, and comparing different models
-for wind and solar energy prediction as described in the paper.
-"""
-
+import time
+import os
+from typing import Callable, Optional, Tuple
+from codecarbon import EmissionsTracker
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-from sklearn.metrics import mean_squared_error, mean_absolute_error
-import time
-import os
-from pathlib import Path
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from src.models.cycle_lstm import CycleLSTMModel
-from src.config import LR
 from tslearn.metrics import SoftDTWLossPyTorch
+from . import config as CFG
+from statsmodels.tsa.arima.model import ARIMA
 
 
-def train_model(model, train_loader, val_loader, epochs, device):
-    """Train the PyTorch model"""
-    criterion = nn.L1Loss()
-    optimizer = optim.Adam(model.parameters(), lr=LR)
+def _unpack_batch(batch):
+    """
+    Supports 2-tensor batches (x, y) and 3-tensor batches (x, y, extra index).
+    """
+    if isinstance(batch, (list, tuple)):
+        if len(batch) == 2:
+            x, y = batch
+            extra = None
+        elif len(batch) == 3:
+            x, y, extra = batch
+        else:
+            raise ValueError(f"Unexpected batch format of length {len(batch)}")
+    else:
+        raise ValueError("Batch must be a tuple/list")
+    return x, y, extra
 
-    train_losses = []
-    val_losses = []
-    best_val_loss = float('inf')
-    patience_counter = 0
-    patience = 8
 
+def _train_model_core(
+    model: torch.nn.Module,
+    train_loader,
+    val_loader,
+    epochs: int,
+    device: torch.device,
+    forward_fn: Callable[[torch.nn.Module, torch.Tensor, Optional[torch.Tensor]], torch.Tensor],
+    loss_fn: nn.Module = nn.L1Loss(),
+    patience: int = CFG.EARLY_STOPPING_PATIENCE,
+    best_path: str = "best_model.pt",
+) -> Tuple[list[float], list[float]]:
+    """
+    Shared training loop with early stopping.
+    """
     model = model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=CFG.LR)
+
+    train_losses: list[float] = []
+    val_losses: list[float] = []
+    best_val = float("inf")
+    wait = 0
+    print(
+        f"\nTraining {model.__class__.__name__} for {epochs} epochs on {device}")
 
     for epoch in range(epochs):
-        # Training phase
+        # Train
         model.train()
-        train_loss = 0.0
-        train_batches = 0
-
-        for batch_x, batch_y in train_loader:
-            batch_x = batch_x.to(device)
-            batch_y = batch_y.to(device)
+        train_loss, train_batches = 0.0, 0
+        for batch in train_loader:
+            x, y, extra = _unpack_batch(batch)
+            x, y = x.to(device), y.to(device)
+            extra = extra.to(device) if extra is not None else None
 
             optimizer.zero_grad()
-            outputs = model(batch_x)
-            loss = criterion(outputs, batch_y)
+            out = forward_fn(model, x, extra)
+            loss = loss_fn(out, y)
             loss.backward()
             optimizer.step()
 
             train_loss += loss.item()
             train_batches += 1
 
-        avg_train_loss = train_loss / train_batches
-        train_losses.append(avg_train_loss)
+        avg_train = train_loss / max(train_batches, 1)
+        train_losses.append(avg_train)
 
-        # Validation phase
+        # Validate
         model.eval()
-        val_loss = 0.0
-        val_batches = 0
-
+        val_loss, n = 0.0, 0
         with torch.no_grad():
-            for batch_x, batch_y in val_loader:
-                batch_x = batch_x.to(device)
-                batch_y = batch_y.to(device)
-                outputs = model(batch_x)
-                loss = criterion(outputs, batch_y)
-                val_loss += loss.item()
-                val_batches += 1
-
-        avg_val_loss = val_loss / val_batches
-        val_losses.append(avg_val_loss)
+            for batch in val_loader:
+                x, y, extra = _unpack_batch(batch)
+                x, y = x.to(device), y.to(device)
+                extra = extra.to(device) if extra is not None else None
+                out = forward_fn(model, x, extra)
+                val_loss += loss_fn(out, y).item() * x.size(0)
+                n += x.size(0)
+        avg_val = val_loss / max(n, 1)
+        val_losses.append(avg_val)
 
         print(
-            f'Epoch [{epoch+1}/{epochs}] - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
+            f"Epoch [{epoch+1}/{epochs}] - Train {avg_train:.4f} | Val {avg_val:.4f}")
 
-        # Early stopping
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), 'best_model.pt')
-            patience_counter = 0
+        # Early stopping + checkpoint
+        if avg_val < best_val:
+            best_val, wait = avg_val, 0
+            torch.save(model.state_dict(), best_path)
         else:
-            patience_counter += 1
+            wait += 1
+            if wait >= patience:
+                print(f"Early stopping at epoch {epoch+1}")
+                break
 
-        if patience_counter >= patience:
-            print(f'Early stopping at epoch {epoch+1}')
-            break
-
-    # Load best model
-    model.load_state_dict(torch.load('best_model.pt'))
-
+    # Load best weights
+    model.load_state_dict(torch.load(best_path))
+    model.eval()
     return train_losses, val_losses
 
 
-def evaluate_model(model, test_loader, device):
-    """Evaluate the model on test data"""
-    model.eval()
-    criterion = nn.MSELoss()
-    mae_criterion = nn.L1Loss()
-    sdtw_criterion = SoftDTWLossPyTorch(gamma=0.1).to(device)
-
-    total_mse = 0.0
-    total_mae = 0.0
-    total_sdtw = 0.0
-    total_samples = 0
-    all_predictions = []
-    all_targets = []
-
+def _predict_core(
+    model: torch.nn.Module,
+    test_loader,
+    device: torch.device,
+    forward_fn: Callable[[torch.nn.Module, torch.Tensor, Optional[torch.Tensor]], torch.Tensor],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Predict full test set using a shared forward function.
+    """
+    preds, trues = [], []
     with torch.no_grad():
-        for batch_x, batch_y in test_loader:
-            batch_x = batch_x.to(device)
-            batch_y = batch_y.to(device)
-            outputs = model(batch_x)
-            mse = criterion(outputs, batch_y)
-            mae = mae_criterion(outputs, batch_y)
-            # SDTW expects 3D tensors: [batch, length, 1]
-            sdtw = sdtw_criterion(outputs.unsqueeze(-1),
-                                  batch_y.unsqueeze(-1)).mean()
-
-            total_mse += mse.item() * batch_x.size(0)
-            total_mae += mae.item() * batch_x.size(0)
-            total_sdtw += sdtw.item() * batch_x.size(0)
-            total_samples += batch_x.size(0)
-
-            all_predictions.append(outputs.cpu().numpy())
-            all_targets.append(batch_y.cpu().numpy())
-
-    avg_mse = total_mse / total_samples
-    avg_mae = total_mae / total_samples
-    avg_sdtw = total_sdtw / total_samples
-
-    predictions = np.vstack(all_predictions)
-    targets = np.vstack(all_targets)
-
-    return avg_mse, avg_mae, avg_sdtw, predictions, targets
+        for batch in test_loader:
+            x, y, extra = _unpack_batch(batch)
+            x = x.to(device)
+            extra = extra.to(device) if extra is not None else None
+            out = forward_fn(model, x, extra)
+            preds.append(out.cpu().numpy())
+            trues.append(y.numpy() if not isinstance(
+                y, torch.Tensor) else y.cpu().numpy())
+    return np.vstack(preds), np.vstack(trues)
 
 
-def plot_predictions(predictions: np.ndarray, targets: np.ndarray, times: np.ndarray,
-                     horizon: int, model_name: str,
-                     save_dir: str | None = None,
-                     num_points: int = 300):
-
-    # ── always reshape 1-D inputs to 2-D ──────────────────────────
-    if predictions.ndim == 1:
-        predictions = predictions.reshape(-1, 1)
-    if targets.ndim == 1:
-        targets = targets.reshape(-1, 1)
-    if times.ndim == 1:
-        times = times.reshape(-1, 1)
-
-    forecast_horizon = predictions.shape[1]
-    h = 0 if forecast_horizon == 1 else horizon - 1
-    if h >= forecast_horizon:
-        raise ValueError(f"Horizon {horizon} exceeds forecast_horizon "
-                         f"{forecast_horizon}")
-
-    times_h = times[:, h]
-    pred_h = predictions[:, h]
-    target_h = targets[:, h]
-
-    # sort chronologically and trim
-    idx = np.argsort(times_h)
-    times_h = times_h[idx][:num_points]
-    pred_h = pred_h[idx][:num_points]
-    target_h = target_h[idx][:num_points]
-
-    fig, ax = plt.subplots(figsize=(17, 6))
-    ax.plot(times_h, target_h, label='Actual',  lw=1.7, alpha=.7)
-    ax.plot(times_h, pred_h,
-            label=f'{horizon}-h Forecast', lw=1.7, ls='--', alpha=.7)
-    ax.set_xlabel('Time'), ax.set_ylabel('% Renewable')
-    ax.set_title(
-        f'{model_name}: {horizon}-h Ahead Forecast (first {len(times_h)} points)')
-    ax.grid(alpha=.3)
-    ax.legend()
-    plt.tight_layout()
-
-    if save_dir:
-        os.makedirs(save_dir, exist_ok=True)
-        fig.savefig(
-            Path(save_dir, f'{model_name}_{horizon}h_forecast.png'), dpi=300)
-    return fig
-
-
-def plot_learning_curve(train_losses, val_losses, model_name: str, save_dir: str | None = None):
+def _time_infer_core(
+    model: torch.nn.Module,
+    test_loader,
+    device: torch.device,
+    forward_fn: Callable[[torch.nn.Module, torch.Tensor, Optional[torch.Tensor]], torch.Tensor],
+) -> float:
     """
-    Plot training and validation losses over epochs.
+    Measure average inference latency per sample in milliseconds.
     """
-    fig, ax = plt.subplots(figsize=(10, 6))
-    epochs = range(1, len(train_losses) + 1)
-    ax.plot(epochs, train_losses, label='Train Loss')
-    ax.plot(epochs, val_losses, label='Val Loss')
-    ax.set_xlabel('Epochs')
-    ax.set_ylabel('Loss')
-    ax.set_title(f'{model_name} Learning Curve')
-    ax.grid(alpha=.3)
-    ax.legend()
-    plt.tight_layout()
-    if save_dir:
-        os.makedirs(save_dir, exist_ok=True)
-        fig.savefig(Path(save_dir, f'{model_name}_learning.png'), dpi=300)
-    return fig
+    t1 = time.time()
+    with torch.no_grad():
+        for batch in test_loader:
+            x, _, extra = _unpack_batch(batch)
+            x = x.to(device)
+            extra = extra.to(device) if extra is not None else None
+            _ = forward_fn(model, x, extra)
+    t2 = time.time()
+    try:
+        n_samples = len(test_loader.dataset)
+    except Exception:
+        n_samples = sum(len(b[0]) for b in test_loader)
+    return 1000.0 * (t2 - t1) / max(n_samples, 1)
 
 
-def train_xgboost_model(model, X_train, y_train, X_val, y_val):
-    """Train XGBoost model with validation monitoring"""
-    print("Training XGBoost model...")
-
-    import time
-    start_time = time.time()
-
-    # Fit the model
-    model.fit(X_train, y_train)
-
-    training_time = time.time() - start_time
-    print(f"Training completed in {training_time:.2f} seconds")
-
-    # Evaluate on validation set
-    print("Evaluating on validation set...")
-    val_pred = model.predict(X_val)
-    val_mse = mean_squared_error(y_val, val_pred)
-    val_mae = mean_absolute_error(y_val, val_pred)
-
-    print(f"Validation MSE: {val_mse:.4f}, MAE: {val_mae:.4f}")
-
-    return model, [val_mse], [val_mse]
+def compute_metrics_original(y_pred: np.ndarray, y_true: np.ndarray) -> dict:
+    """
+    Original metrics for consistency with existing outputs.
+    """
+    mae_path = float(np.mean(np.abs(y_pred - y_true)))
+    rmse_path = float(np.sqrt(np.mean((y_pred - y_true) ** 2)))
+    mae_t72 = float(np.mean(np.abs(y_pred[:, -1] - y_true[:, -1])))
+    rmse_t72 = float(np.sqrt(np.mean((y_pred[:, -1] - y_true[:, -1]) ** 2)))
+    soft_dtw = None
+    try:
+        with torch.no_grad():
+            sdtw = SoftDTWLossPyTorch(gamma=0.1)
+            a = torch.tensor(y_pred, dtype=torch.float32).unsqueeze(-1)
+            b = torch.tensor(y_true, dtype=torch.float32).unsqueeze(-1)
+            soft_dtw = float(sdtw(a, b).mean().item())
+    except Exception:
+        soft_dtw = None
+    return dict(mae_path=mae_path, rmse_path=rmse_path,
+                mae_t72=mae_t72, rmse_t72=rmse_t72, soft_dtw=soft_dtw)
 
 
-def evaluate_xgboost_model(model, X_test, y_test):
-    """Evaluate XGBoost model"""
-    print("Making predictions on test set...")
-    predictions = model.predict(X_test)
+def train_and_eval_generic(
+    model: torch.nn.Module,
+    loaders,
+    device: torch.device,
+    epochs: int,
+    forward_fn: Callable[[torch.nn.Module, torch.Tensor, Optional[torch.Tensor]], torch.Tensor],
+    best_path: str,
+) -> Tuple[dict, np.ndarray, np.ndarray]:
+    """
+    Generic runner for torch models (vanilla and models needing an extra index).
+    """
+    train_loader, val_loader, test_loader = loaders
 
-    print("Calculating metrics...")
-    mse = mean_squared_error(y_test, predictions)
-    mae = mean_absolute_error(y_test, predictions)
+    # Train
+    t0 = time.time()
+    _ = _train_model_core(
+        model=model.to(device),
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=epochs,
+        device=device,
+        forward_fn=forward_fn,
+        best_path=best_path,
+    )
+    train_time = time.time() - t0
 
-    # Skip Soft-DTW for faster evaluation
-    avg_sdtw = 0.0
-    print("Skipping Soft-DTW calculation for faster evaluation")
+    # Predict + metrics
+    y_pred, y_true = _predict_core(
+        model, test_loader, device, forward_fn=forward_fn)
 
-    return mse, mae, avg_sdtw, predictions, y_test
+    # Inference timing
+    infer_ms_per_sample = _time_infer_core(
+        model, test_loader, device, forward_fn=forward_fn)
+
+    metrics = compute_metrics_original(y_pred, y_true)
+    metrics.update(dict(train_time_s=float(train_time),
+                        infer_ms_per_sample=float(infer_ms_per_sample)))
+    return metrics, y_pred, y_true
+
+
+def train_and_eval_torch_model(name, model, loaders, device, epochs):
+    """
+    Thin wrapper for vanilla torch models (forward(x)).
+    """
+    return train_and_eval_generic(
+        model=model,
+        loaders=loaders,
+        device=device,
+        epochs=epochs,
+        forward_fn=lambda m, x, extra: m(x),
+        best_path="best_model.pt",
+    )
+
+
+def train_and_eval_xgboost_full(Xtr, ytr, Xva, yva, Xte, yte, xgb_forecaster_ctor, best_path: str):
+    """
+    XGBoost runner: fit on train, predict on test, measure train time and latency.
+    """
+    print("\nTraining XGBoost model")
+    # Use centrally defined XGBoost parameters
+    model = xgb_forecaster_ctor(**CFG.XGB_PARAMS)
+
+    # Train time
+    t0 = time.time()
+    model.fit(Xtr, ytr)
+    train_time = time.time() - t0
+    model.save(best_path)
+    # Predict + inference timing
+    t1 = time.time()
+    y_pred = model.predict(Xte)
+    infer_ms_per_sample = 1000.0 * (time.time() - t1) / max(len(Xte), 1)
+
+    metrics = compute_metrics_original(y_pred, yte)
+    metrics.update(dict(train_time_s=float(train_time),
+                        infer_ms_per_sample=float(infer_ms_per_sample)))
+    return metrics, y_pred, yte
+
+
+def train_and_eval_arima(df: pd.DataFrame, Tte: np.ndarray, yte: np.ndarray,
+                         order=(1, 1, 1), refit_every=24):
+    """
+    ARIMA runner: refit every refit_every hours, forecast per test anchor.
+    """
+    print(f"\nTraining ARIMA{order} with refit every {refit_every} steps")
+    idx_map = {ts: i for i, ts in enumerate(df.index)}
+    y_full = df["y"].values.astype(float)
+    N, H = yte.shape
+    preds = np.zeros((N, H), dtype=float)
+
+    t0 = time.time()
+    last_fit_pos, model_fit = None, None
+    for i in range(N):
+        anchor_ts = pd.to_datetime(Tte[i, 0])
+        train_end = idx_map[anchor_ts]
+        if (last_fit_pos is None) or (train_end - last_fit_pos >= refit_every) or (model_fit is None):
+            model_fit = ARIMA(y_full[:train_end], order=order).fit()
+            last_fit_pos = train_end
+        preds[i, :] = model_fit.forecast(steps=H)
+    train_time = time.time() - t0
+
+    metrics = compute_metrics_original(preds, yte)
+    metrics.update(dict(train_time_s=float(train_time),
+                        infer_ms_per_sample=0.0))
+    return metrics, preds, yte
+
+
+def forward_auto(model: torch.nn.Module, x: torch.Tensor, extra: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    Call model(x[, extra]) depending on whether `extra` is provided and supported.
+    """
+    # Special handling for CycleLSTM which needs seq_len in forward
+    if model.__class__.__name__ == "CycleLSTM":
+        return model(x, extra, seq_len=CFG.LOOKBACK_HOURS)
+    if extra is None:
+        return model(x)
+    try:
+        return model(x, extra)
+    except TypeError:  # pragma: no cover
+        # Fallback if model does not accept extra
+        return model(x)
+
+
+def run_model_any(
+    spec: dict,
+    data: dict,
+    loaders,
+    cycle_loaders,
+    device: torch.device,
+    epochs: int,
+    out_dir: str,
+) -> tuple[dict, np.ndarray, np.ndarray]:
+    """
+    Universal runner covering torch (with/without extra), XGBoost, and ARIMA.
+    Expects spec keys:
+      - name (str)
+      - type ('torch'|'xgb'|'arima')
+      - build (callable)  for 'torch' or 'xgb' (returns model or XGB class)
+      - needs_cycle_idx (bool, optional) for torch models that use extra index
+      - order (tuple), refit_every (int) for ARIMA
+    """
+    name = spec["name"]
+    mtype = spec["type"]
+
+    tracker = None
+    if CFG.TRACK_EMISSIONS:
+        tracker = EmissionsTracker(
+            project_name=f"carbon_{name}", output_dir=out_dir, log_level="error")
+        tracker.start()
+
+    if mtype == "torch":
+        # Build model and select loaders
+        model = spec["build"]().to(device)
+        use_cycle = spec.get("needs_cycle_idx", False)
+        chosen_loaders = cycle_loaders if use_cycle else loaders
+        checkpoint_dir = os.path.join(out_dir, "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        best_path = os.path.join(
+            checkpoint_dir, f"{name.replace(' ', '_').replace('/', '_')}.pt")
+
+        metrics, y_pred, y_true = train_and_eval_generic(
+            model=model,
+            loaders=chosen_loaders,
+            device=device,
+            epochs=epochs,
+            forward_fn=forward_auto,
+            best_path=best_path,
+        )
+        # Parameter count
+        metrics["param_count"] = int(sum(p.numel()
+                                     for p in model.parameters()))
+
+    elif mtype == "xgb":
+        # build returns the constructor/class
+        checkpoint_dir = os.path.join(out_dir, "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        best_path = os.path.join(
+            checkpoint_dir, f"{name.replace(' ', '_').replace('/', '_')}.joblib")
+
+        xgb_ctor = spec["build"]()
+        metrics, y_pred, y_true = train_and_eval_xgboost_full(
+            data["Xtr"], data["ytr"], data["Xva"], data["yva"], data["Xte"], data["yte"], xgb_ctor, best_path
+        )
+        metrics["param_count"] = "N/A"
+
+    elif mtype == "arima":
+        order = spec.get("order", (1, 1, 1))
+        refit_every = spec.get("refit_every", 24)
+        metrics, y_pred, y_true = train_and_eval_arima(
+            df=data["df"], Tte=data["Tte"], yte=data["yte"], order=order, refit_every=refit_every
+        )
+        metrics["param_count"] = "N/A"
+
+    else:
+        if tracker:
+            tracker.stop()
+        raise ValueError(f"Unknown model type: {mtype}")
+
+    carbon_kg = 0.0
+    if tracker:
+        carbon_kg = tracker.stop() or 0.0
+    metrics["carbon_kg"] = float(carbon_kg or 0.0)
+    return metrics, y_pred, y_true

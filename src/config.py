@@ -6,7 +6,7 @@ SEED = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Data date range
-START_DATE = datetime(2021, 8, 13)
+START_DATE = datetime(2023, 8, 13)
 END_DATE = datetime(2025, 8, 12)
 
 LOOKBACK_HOURS = 72
@@ -16,6 +16,7 @@ TEST_FRAC = 0.15
 BATCH_SIZE = 256
 EPOCHS = 50
 LR = 3e-4
+EARLY_STOPPING_PATIENCE = 8
 
 SELECTED_WEATHER_VARS = [
     "temperature", "wind_speed", "pressure",
@@ -33,28 +34,24 @@ CHUNK_LENGTH_FORECAST = 16    # ≤16 days per request
 # ---------------- Country configuration ----------------
 COUNTRY = "DE"
 
-# Representative coordinates for Open-Meteo (capital or grid hub per country)
-COUNTRY_COORDS = {
-    "DE": (52.5200, 13.4050),  # Berlin
-    "DK": (55.6760, 12.5680),  # Copenhagen
-    "NL": (52.3676, 4.9041),   # Amsterdam
-    "BE": (50.8503, 4.3517),   # Brussels
-    "ES": (40.4168, -3.7038),  # Madrid
-    "FR": (48.8566, 2.3522),   # Paris
-    "IT": (41.9028, 12.4964),  # Rome
-    "PL": (52.2297, 21.0122),  # Warsaw
-    "CZ": (50.0755, 14.4378),  # Prague
-    "AT": (48.2082, 16.3738),  # Vienna
-    "SE": (59.3293, 18.0686),  # Stockholm
-    "NO": (59.9139, 10.7522),  # Oslo
-    "PT": (38.7223, -9.1393),  # Lisbon
-    "IE": (53.3498, -6.2603),  # Dublin
-    "UK": (51.5074, -0.1278),  # London
-    "FI": (60.1699, 24.9384),  # Helsinki
-    "CH": (46.9480, 7.4474),   # Bern
-}
+# ---------------- General execution settings ----------------
+TRACK_EMISSIONS = True
+SAVE_PLOTS = True
 
-LAT, LON = COUNTRY_COORDS.get(COUNTRY, COUNTRY_COORDS["DE"])
+# List of models to run in the benchmark.
+MODEL_RUN_LIST = [
+    "LSTM", "GRU", "TCN", "CNN-LSTM", "Seq2Seq", "Informer", "Transformer",
+    "CycleLSTM", "XGBoost", "ARIMA(1,1,1)"
+]
+
+# ---------------- Carbon emissions & Scheduling ----------------
+AVG_CI_G_PER_KWH = 400.0      # fallback proxy if CI data unavailable
+USE_GLOBAL_CI_CURVE = True   # prefetch full CI span and slice in-memory
+
+SCHEDULER_RUNTIME_H = 8
+SCHEDULER_THRESHOLD = 0.75
+SCHEDULER_THRESHOLDS = (0.7, 0.75, 0.9)
+
 
 # ---------------- Carbon emissions configuration ----------------
 DEFAULT_SERVER = dict(
@@ -66,3 +63,31 @@ DEFAULT_SERVER = dict(
     power_draw_mem=0.3725,  # W / GiB
     power_usage_efficiency=1.6,
 )
+
+# ---------------- Model defaults ----------------
+MODEL_DEFAULTS = {
+    "ARIMA":       {"order": (1, 1, 1), "refit_every": 24},
+    "CNN-LSTM":    {"conv_channels": [64, 64, 64], "lstm_hidden": 256, "dropout": 0.2},
+    "CycleLSTM":   {"hidden_size": 256, "num_layers": 1, "cycle_len": 24, "dropout": 0.2},
+    "GRU":         {"hidden_size1": 352, "hidden_size2": 128, "dropout": 0.3},
+    "Informer":    {"d_model": 128, "nhead": 4, "num_layers": 3, "dim_feedforward": 256, "dropout": 0.25, "distill": True},
+    "LSTM":        {"hidden_size1": 256, "hidden_size2": 128, "dropout1": 0.3, "dropout2": 0.1},
+    "Seq2Seq":     {"hidden_size": 128, "num_layers": 2, "dropout": 0.2, "tf_ratio": 0.7},
+    "TCN":         {"channels": 128, "levels": 7, "kernel_size": 3, "dropout": 0.3},
+    "Transformer": {"d_model": 128, "nhead": 4, "num_layers": 2, "dim_feedforward": 256, "dropout": 0.1},
+}
+
+# XGBoost defaults
+XGB_PARAMS = {
+    "objective": "reg:squarederror",
+    "learning_rate": 0.01,
+    "n_estimators": 200,
+    "max_depth": 6,
+    "random_state": 42,
+    "eval_metric": "rmse",
+    "tree_method": "hist",
+    "lambda": 1.2,
+    "alpha": 0.2,
+    "colsample_bytree": 0.8,
+    "subsample": 0.8,
+}

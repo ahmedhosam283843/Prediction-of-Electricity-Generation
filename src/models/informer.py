@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 
+
 class PositionalEncoding(nn.Module):
     """
     Fixed sinusoidal positional encoding, added to sequence embeddings.
@@ -19,8 +20,10 @@ class PositionalEncoding(nn.Module):
         super().__init__()
         self.drop = nn.Dropout(dropout)
         pe = torch.zeros(max_len, d_model)  # (L, D)
-        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)  # (L, 1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
+        position = torch.arange(
+            0, max_len, dtype=torch.float32).unsqueeze(1)  # (L, 1)
+        div_term = torch.exp(torch.arange(
+            0, d_model, 2).float() * (-np.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)  # even indices
         pe[:, 1::2] = torch.cos(position * div_term)  # odd indices
         self.register_buffer("pe", pe)
@@ -58,7 +61,7 @@ class InformerForecaster(nn.Module):
         input_dim: int,
         horizon: int,
         d_model: int = 128,
-        nhead: Optional[int] = None,
+        nhead: int = 4,
         num_layers: int = 3,
         dim_feedforward: int = 256,
         dropout: float = 0.1,
@@ -69,7 +72,7 @@ class InformerForecaster(nn.Module):
             input_dim: Number of input features F.
             horizon: Forecast horizon H (number of steps to predict).
             d_model: Transformer embedding dimension.
-            nhead: Number of attention heads (if provided).
+            nhead: Number of attention heads.
             num_layers: Number of encoder layers.
             dim_feedforward: Hidden dimension of the feedforward network.
             dropout: Dropout probability.
@@ -79,14 +82,15 @@ class InformerForecaster(nn.Module):
         self.horizon = horizon
         self.d_model = d_model
         self.distill = distill
-        self.nhead = nhead or 4  # default if not provided
+        self.nhead = nhead
 
         # Input projection to model dimension
         self.input_proj = nn.Linear(input_dim, d_model)
 
         # Optional distillation conv (downsample along time by stride=2)
         self.distill_conv = (
-            nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1) if distill else None
+            nn.Conv1d(d_model, d_model, kernel_size=3,
+                      stride=2, padding=1) if distill else None
         )
 
         # Positional encoding
@@ -101,7 +105,8 @@ class InformerForecaster(nn.Module):
             batch_first=False,
             activation="relu",
         )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_layers)
 
         # MLP head mapping last token to horizon outputs
         self.head = nn.Sequential(

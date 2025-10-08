@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+
 class RecurrentCycle(nn.Module):
     """
     Learnable cyclical bias table indexed by (hour-of-cycle, ...).
@@ -18,7 +19,8 @@ class RecurrentCycle(nn.Module):
         super(RecurrentCycle, self).__init__()
         self.cycle_len = cycle_len
         self.channel_size = channel_size
-        self.data = nn.Parameter(torch.zeros(cycle_len, channel_size), requires_grad=True)
+        self.data = nn.Parameter(torch.zeros(
+            cycle_len, channel_size), requires_grad=True)
 
     def forward(self, index, length):
         """
@@ -30,8 +32,10 @@ class RecurrentCycle(nn.Module):
             Tensor: (batch, length, channel_size)
         """
         # Build indices for a contiguous window modulo cycle length
-        gather_index = (index.view(-1, 1) + torch.arange(length, device=index.device).view(1, -1)) % self.cycle_len
+        gather_index = (index.view(-1, 1) + torch.arange(length,
+                        device=index.device).view(1, -1)) % self.cycle_len
         return self.data[gather_index]
+
 
 class CycleLSTMModel(nn.Module):
     """
@@ -42,7 +46,7 @@ class CycleLSTMModel(nn.Module):
     - Adds a cyclical bias back to the outputs at the appropriate future indices.
     """
 
-    def __init__(self, input_size, hidden_size, num_layers, output_size, cycle_len, seq_len, dropout=0.2):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, cycle_len, dropout=0.2):
         """
         Args:
             input_size (int): Number of input features per time step.
@@ -50,13 +54,11 @@ class CycleLSTMModel(nn.Module):
             num_layers (int): Number of LSTM layers.
             output_size (int): Forecast horizon (steps ahead).
             cycle_len (int): Length of the seasonal cycle (e.g., 24).
-            seq_len (int): Input sequence length.
             dropout (float): Dropout in LSTM between layers.
         """
         super(CycleLSTMModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.seq_len = seq_len
         self.output_size = output_size
         self.cycle_len = cycle_len
 
@@ -64,10 +66,11 @@ class CycleLSTMModel(nn.Module):
         self.cycleQueue_input = RecurrentCycle(cycle_len, input_size)
         self.cycleQueue_output = RecurrentCycle(cycle_len, 1)
 
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
+        self.lstm = nn.LSTM(input_size, hidden_size,
+                            num_layers, batch_first=True, dropout=dropout)
         self.fc = nn.Linear(hidden_size, output_size)
 
-    def forward(self, x, index):
+    def forward(self, x, index, seq_len: int):
         """
         Forward pass.
 
@@ -78,19 +81,24 @@ class CycleLSTMModel(nn.Module):
         Returns:
             Tensor: (batch_size, output_size)
         """
-        # Remove cyclical bias from inputs
-        cq_input = self.cycleQueue_input(index, self.seq_len)  # (batch_size, seq_len, input_size)
+        # Remove cyclical bias from inputs. seq_len is passed from config.
+        # (batch_size, seq_len, input_size)
+        cq_input = self.cycleQueue_input(index, seq_len)
         x = x - cq_input
 
         # Initialize hidden state
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        h0 = torch.zeros(self.num_layers, x.size(
+            0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(
+            0), self.hidden_size).to(x.device)
 
         # LSTM encoder
-        out, _ = self.lstm(x, (h0, c0))             # (batch_size, seq_len, hidden_size)
+        # (batch_size, seq_len, hidden_size)
+        out, _ = self.lstm(x, (h0, c0))
         out = self.fc(out[:, -1, :])                # (batch_size, output_size)
 
         # Add cyclical bias for predicted steps: start from (index + seq_len)
-        cp_output = self.cycleQueue_output((index + self.seq_len) % self.cycle_len, self.output_size)  # (batch, output_size, 1)
+        cp_output = self.cycleQueue_output(
+            (index + seq_len) % self.cycle_len, self.output_size)  # (batch, output_size, 1)
         out = out + cp_output.squeeze(2)            # (batch_size, output_size)
         return out

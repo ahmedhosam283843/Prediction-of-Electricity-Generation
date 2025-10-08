@@ -2,10 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class Encoder(nn.Module):
     """
     LSTM encoder that maps an input sequence to final hidden/cell states.
-    
+
     Input:
       x: (B, L, F)
 
@@ -13,22 +14,23 @@ class Encoder(nn.Module):
       (h, c): each shaped (n_layers, B, hid)
     """
 
-    def __init__(self, in_dim: int, hid: int = 128,
-                 n_layers: int = 2, drop: float = 0.1):
+    def __init__(self, in_dim: int, hidden_size: int = 128,
+                 num_layers: int = 2, dropout: float = 0.1):
         """
         Args:
             in_dim (int): Number of features per time step.
-            hid (int): Hidden size of the LSTM.
-            n_layers (int): Number of LSTM layers.
-            drop (float): Dropout between LSTM layers.
+            hidden_size (int): Hidden size of the LSTM.
+            num_layers (int): Number of LSTM layers.
+            dropout (float): Dropout between LSTM layers.
         """
         super().__init__()
-        self.lstm = nn.LSTM(in_dim, hid, n_layers,
-                            dropout=drop, batch_first=True)
+        self.lstm = nn.LSTM(in_dim, hidden_size, num_layers,
+                            dropout=dropout, batch_first=True)
 
     def forward(self, x):                             # x: B × L × F
         _, (h, c) = self.lstm(x)
         return h, c                                   # n_layers × B × hid
+
 
 class Decoder(nn.Module):
     """
@@ -42,20 +44,20 @@ class Decoder(nn.Module):
     Produces horizon-length univariate output.
     """
 
-    def __init__(self, hid: int, horizon: int,
-                 n_layers: int = 2, drop: float = 0.1):
+    def __init__(self, hidden_size: int, horizon: int,
+                 num_layers: int = 2, dropout: float = 0.1):
         """
         Args:
-            hid (int): Hidden size of the LSTM (matches encoder).
+            hidden_size (int): Hidden size of the LSTM (matches encoder).
             horizon (int): Number of future steps to generate.
-            n_layers (int): Number of LSTM layers.
-            drop (float): Dropout between LSTM layers.
+            num_layers (int): Number of LSTM layers.
+            dropout (float): Dropout between LSTM layers.
         """
         super().__init__()
         self.horizon = horizon
-        self.lstm = nn.LSTM(1, hid, n_layers,
-                            dropout=drop, batch_first=True)
-        self.fc = nn.Linear(hid, 1)
+        self.lstm = nn.LSTM(1, hidden_size, num_layers,
+                            dropout=dropout, batch_first=True)
+        self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, y0, h, c,
                 teacher=None, tf_ratio: float = 0.5):
@@ -86,6 +88,7 @@ class Decoder(nn.Module):
 
         return torch.cat(outs, dim=1)      # B × horizon
 
+
 class Seq2SeqForecaster(nn.Module):
     """
     Sequence-to-sequence forecaster (Encoder-Decoder LSTM).
@@ -95,21 +98,21 @@ class Seq2SeqForecaster(nn.Module):
     """
 
     def __init__(self, in_dim: int, horizon: int,
-                 hid: int = 128, n_layers: int = 2,
-                 drop: float = 0.1, tf_ratio: float = 0.7):
+                 hidden_size: int = 128, num_layers: int = 2,
+                 dropout: float = 0.1, tf_ratio: float = 0.7):
         """
         Args:
             in_dim (int): Number of input features per time step.
             horizon (int): Number of future steps to predict.
-            hid (int): Hidden size for both encoder and decoder LSTM.
-            n_layers (int): Number of layers in both encoder and decoder.
-            drop (float): Dropout in LSTMs.
+            hidden_size (int): Hidden size for both encoder and decoder LSTM.
+            num_layers (int): Number of layers in both encoder and decoder.
+            dropout (float): Dropout in LSTMs.
             tf_ratio (float): Teacher forcing ratio used during training.
         """
         super().__init__()
-        self.encoder   = Encoder(in_dim, hid, n_layers, drop)
-        self.decoder   = Decoder(hid, horizon, n_layers, drop)
-        self.tf_ratio  = tf_ratio
+        self.encoder = Encoder(in_dim, hidden_size, num_layers, dropout)
+        self.decoder = Decoder(hidden_size, horizon, num_layers, dropout)
+        self.tf_ratio = tf_ratio
 
     def forward(self, x, y_future=None):
         """
@@ -123,7 +126,7 @@ class Seq2SeqForecaster(nn.Module):
         self.decoder.horizon = self.decoder.horizon  # no-op; keeps interface consistent
         h, c = self.encoder(x)
         # Use the LAST time step's target-like channel as decoder seed
-        y0   = x[:, -1, -1]      # shape (B)
+        y0 = x[:, -1, -1]      # shape (B)
         tf_r = self.tf_ratio if self.training else 0.0
         return self.decoder(y0, h, c,
                             teacher=y_future, tf_ratio=tf_r)

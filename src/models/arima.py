@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from statsmodels.tsa.arima.model import ARIMA
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+from .. import config as CFG
 
 def _safe_mape(y_true: np.ndarray, y_pred: np.ndarray, eps: float = 1e-8) -> float:
     """
@@ -31,7 +32,7 @@ class ARIMAModel:
     with other forecasters used in the pipeline.
     """
 
-    def __init__(self, order: tuple[int, int, int] = (1, 1, 1)) -> None:
+    def __init__(self, order: tuple[int, int, int] = CFG.MODEL_DEFAULTS["ARIMA"]["order"]) -> None:
         """
         Initialize the ARIMA model.
 

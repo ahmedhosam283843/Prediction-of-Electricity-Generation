@@ -64,7 +64,7 @@ class TransformerForecaster(nn.Module):
         self,
         input_dim: int,
         horizon: int,
-        d_model: int = 128,
+        d_model: int,
         nhead: int = 4,
         num_layers: int = 2,
         dim_feedforward: int = 256,

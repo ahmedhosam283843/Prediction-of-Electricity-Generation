@@ -288,7 +288,9 @@ def carbon_plot_single(pred_renew: np.ndarray,
         attainment = 100.0 * (kg_now - kg_pred) / (kg_now - kg_oracle)
 
     # --------------------------- plot ---------------------------------
-    fig, ax1 = plt.subplots(figsize=(5, 3.5))
+    fig = plt.figure(figsize=(10.5, 3.8))
+    gs = fig.add_gridspec(1, 2, width_ratios=[3, 1], wspace=0.05)
+    ax1 = fig.add_subplot(gs[0])
 
     if pred_renew is not None:
         ax1.plot(t_idx, pred_renew * 100, lw=2, label="Predicted % renewable")
@@ -301,96 +303,36 @@ def carbon_plot_single(pred_renew: np.ndarray,
     fc_start = t_idx[best_pred_i]
     fc_end = fc_start + timedelta(hours=runtime_h)
     ax1.axvspan(fc_start, fc_end, alpha=.35, color="orange",
-                edgecolor="orange", lw=2, label="Energy-forecast")
+                edgecolor="darkorange", lw=2, label="Energy-max (forecast)")
 
     if oracle_span[0] is not None:
-        ax1.axvspan(*oracle_span, alpha=.20, edgecolor="blue", lw=2,
-                    label="Energy-targets")
+        ax1.axvspan(*oracle_span, alpha=.20, edgecolor="navy", lw=2,
+                    label="Energy-max (target)")
 
     lbl = f"Savings vs now: {saved_vs_now_pct:.0f}%"
     if attainment is not None:
         lbl += f"\n(= {attainment:.0f}% of optimal)"
     ax1.text(fc_start + timedelta(hours=runtime_h/2), 50, lbl,
-             ha="center", va="center", fontsize=6, weight="bold")
+             ha="center", va="center", fontsize=10, weight="bold")
 
+    ax_box = fig.add_subplot(gs[1])
+    ax_box.axis("off")
     lines = [f"Start now:             {kg_now:.2f} kg",
-             f"Emissions (forecast): {kg_pred:.2f} kg"]
+             f"Energy-max (forecast): {kg_pred:.2f} kg"]
     if kg_oracle is not None:
-        lines.append(f"Emissions (target):   {kg_oracle:.2f} kg")
-    text_str = "\n".join(lines)
-    props = dict(boxstyle='round,pad=0.5', facecolor='wheat', alpha=0.5)
-
-    # Place a text box in bottom right in axes coords
-    ax1.text(0.98, 0.02, text_str, transform=ax1.transAxes, fontsize=6,
-             verticalalignment='bottom', horizontalalignment='right',
-             bbox=props, family="monospace")
+        lines.append(f"Energy-max (target):   {kg_oracle:.2f} kg")
+    ax_box.text(0.05, 0.98, "\n".join(lines),
+                ha="left", va="top", family="monospace", fontsize=8)
 
     ax1.set_xlabel("Time")
     ax1.set_title(
-        f"Optimal energy window ({runtime_h} h — {server['country']})\nModel: {model_name}", fontsize=8)
+        f"Optimal energy window ({runtime_h} h — {server['country']})\nModel: {model_name}")
     ax1.grid(ls="--", alpha=.3)
     ax1.legend(fontsize=8)
     fig.autofmt_xdate()
     plt.tight_layout()
     return fig, (fc_start, fc_end), oracle_span
 
-
-def scheduling_stats(pred_renew: np.ndarray,
-                     start_ts: pd.Timestamp,
-                     runtime_h: int = CFG.SCHEDULER_RUNTIME_H,
-                     thresholds: Sequence[float] = CFG.SCHEDULER_THRESHOLDS,
-                     server: dict = CFG.DEFAULT_SERVER) -> pd.DataFrame:
-    """
-    Summarize scheduling choices and their emissions compared to starting now.
-
-    Args:
-        pred_renew: Forecast renewable path in [0, 1].
-        start_ts: Start timestamp of the path.
-        runtime_h: Job duration in hours.
-        thresholds: Sequence of average renewable thresholds to enforce.
-        server: Server configuration dict.
-
-    Returns:
-        DataFrame with rows for:
-          - Start now
-          - Energy-max (no target)
-          - Energy-max for each threshold in `thresholds`
-    """
-    H = len(pred_renew)
-    t_idx = pd.date_range(start=start_ts, periods=H, freq="h")
-    w = np.ones(runtime_h) / runtime_h
-    avg_ren = np.convolve(pred_renew, w, mode="valid")
-    # Proxy CI only used for display; _true_kg uses actual CI if available
-    proxy_ci = CFG.AVG_CI_G_PER_KWH * (1 - avg_ren)
-
-    kg_now = _true_kg(t_idx[0], proxy_ci[0], runtime_h, server)
-
-    rows = [dict(criterion="Start now",
-                 suggested_start=t_idx[0],
-                 avg_renew_pct=avg_ren[0] * 100,
-                 emissions_kg=kg_now,
-                 saved_kg=0.0, saved_pct=0.0)]
-
-    best_any = _energy_best_idx(avg_ren, threshold=None)
-    kg_any = _true_kg(t_idx[best_any], proxy_ci[best_any], runtime_h, server)
-    rows.append(dict(criterion="Energy-max (no target)",
-                     suggested_start=t_idx[best_any],
-                     avg_renew_pct=avg_ren[best_any] * 100,
-                     emissions_kg=kg_any,
-                     saved_kg=kg_now - kg_any,
-                     saved_pct=100 * (kg_now - kg_any) / max(kg_now, 1e-9)))
-
-    for thr in thresholds:
-        best_thr = _energy_best_idx(avg_ren, threshold=thr)
-        kg_thr = _true_kg(
-            t_idx[best_thr], proxy_ci[best_thr], runtime_h, server)
-        rows.append(dict(criterion=f"Energy-max (avg ≥ {int(thr*100)} %)",
-                         suggested_start=t_idx[best_thr],
-                         avg_renew_pct=avg_ren[best_thr] * 100,
-                         emissions_kg=kg_thr,
-                         saved_kg=kg_now - kg_thr,
-                         saved_pct=100 * (kg_now - kg_thr) / max(kg_now, 1e-9)))
-    return pd.DataFrame(rows)
 
 
 def scheduler_metrics(pred_renew: np.ndarray,
@@ -501,7 +443,7 @@ def summarize_scheduler(y_pred: np.ndarray,
                         threshold: float = CFG.SCHEDULER_THRESHOLD,
                         country: str = CFG.COUNTRY) -> tuple[pd.DataFrame, dict]:
     """
-    Run scheduler metrics across the test set and save per-sample CSV + summary JSON.
+    Run scheduler metrics across the test set and save a summary JSON.
 
     Args:
         y_pred: Model predictions (N, H).
@@ -514,7 +456,7 @@ def summarize_scheduler(y_pred: np.ndarray,
         country: ISO country code.
 
     Returns:
-        (df, summary) where df is the per-sample metrics DataFrame and summary is a dict.
+        (df, summary) where df is the per-sample metrics DataFrame and summary is a dict of aggregates.
     """
     rows = []
     for i in tqdm(range(len(y_pred)), desc=f"[{model_name}] scheduler", unit="sample"):
@@ -530,8 +472,6 @@ def summarize_scheduler(y_pred: np.ndarray,
         rows.append(m)
     df = pd.DataFrame(rows)
     os.makedirs(out_dir, exist_ok=True)
-    df.to_csv(os.path.join(
-        out_dir, f"{model_name}_scheduler_samples.csv"), index=False)
 
     exact_match = float(
         (df["pred_start_idx"] == df["oracle_start_idx"]).mean() * 100.0)
@@ -557,58 +497,6 @@ def summarize_scheduler(y_pred: np.ndarray,
           f"({summary['avg_saved_pct']:.1f} %), attain {summary['avg_attainment_pct']:.1f} %, "
           f"hit-rate {summary['threshold_hit_rate_pred']:.1f} %")
     return df, summary
-
-
-def table_R2_last_sample(model_name: str,
-                         model_preds: dict[str, np.ndarray],
-                         y_true_ref: np.ndarray,
-                         Tte: np.ndarray,
-                         out_dir: str,
-                         runtime_h: int = CFG.SCHEDULER_RUNTIME_H,
-                         threshold: float = CFG.SCHEDULER_THRESHOLD):
-    """
-    Save a scheduling comparison table for the last test sample (R2 figure table).
-
-    Args:
-        model_name: Which model to use from model_preds.
-        model_preds: Dict of model_name → predictions (N, H).
-        y_true_ref: Reference ground truth (N, H).
-        Tte: Timestamps array (N, H).
-        out_dir: Output directory.
-        runtime_h: Job runtime in hours.
-        threshold: Minimum average renewable share.
-
-    Returns:
-        None (writes CSV and prints path).
-    """
-    i = len(y_true_ref) - 1
-    start_ts = pd.to_datetime(Tte[i, 0])
-    pred = model_preds[model_name][i]
-    true = y_true_ref[i]
-    df_sched = scheduling_stats(
-        pred_renew=pred, start_ts=start_ts, runtime_h=runtime_h,
-        thresholds=(threshold,), server=None,
-    )
-    m = scheduler_metrics(pred, true, start_ts, runtime_h,
-                          threshold, country=CFG.COUNTRY)
-    oracle_row = dict(
-        criterion="Energy-max (oracle)",
-        suggested_start=m["oracle_start_ts"],
-        avg_renew_pct=(m["avg_ren_true_win"] *
-                       100.0 if m["avg_ren_true_win"] is not None else None),
-        emissions_kg=m["kg_oracle"],
-        saved_kg=(m["kg_now"] - m["kg_oracle"]
-                  ) if m["kg_oracle"] is not None else None,
-        saved_pct=(100.0 * (m["kg_now"] - m["kg_oracle"]) /
-                   m["kg_now"]) if m["kg_oracle"] is not None else None
-    )
-    df_sched = pd.concat(
-        [df_sched, pd.DataFrame([oracle_row])], ignore_index=True)
-    os.makedirs(out_dir, exist_ok=True)
-    df_sched_path = os.path.join(out_dir, f"{model_name}_R2_last_sample.csv")
-    df_sched.to_csv(df_sched_path, index=False)
-    print(
-        f"[R2] Saved last-sample scheduling table for {model_name} → {df_sched_path}")
 
 
 def set_ci_from_test_span(Tte: np.ndarray, horizon_h: int, country: str):
@@ -650,7 +538,7 @@ def run_scheduler_suite(model_preds: dict[str, np.ndarray], y_true_ref: np.ndarr
         f"\n=== Scheduling metrics across test set (R={runtime_h}h, thr={threshold}) ===")
     scheduler_summaries: list[dict] = []
     for mname in model_preds:
-        df_sched, summary = summarize_scheduler(
+        _, summary = summarize_scheduler(
             y_pred=model_preds[mname],
             y_true=y_true_ref,
             Tte=Tte,
@@ -661,15 +549,6 @@ def run_scheduler_suite(model_preds: dict[str, np.ndarray], y_true_ref: np.ndarr
             country=country
         )
         scheduler_summaries.append(summary)
-        table_R2_last_sample(
-            model_name=mname,
-            model_preds=model_preds,
-            y_true_ref=y_true_ref,
-            Tte=Tte,
-            out_dir=out_dir,
-            runtime_h=runtime_h,
-            threshold=threshold
-        )
     if scheduler_summaries:
         with open(os.path.join(out_dir, "all_scheduler_summaries.json"), "w") as f:
             json.dump(scheduler_summaries, f, indent=2)

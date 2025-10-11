@@ -42,7 +42,7 @@ def test_weather_data_loading():
         print(
             f"Date range: {weather_data_real.index.min()} to {weather_data_real.index.max()}")
         print(f"Available parameters: {weather_data_real.columns.tolist()}")
-        weather_data_real.to_csv('weather_data_real.csv')
+        # weather_data_real.to_csv('weather_data_real.csv')
         # Plot temperature if available
         if 'temperature' in weather_data_real.columns:
             plt.figure(figsize=(12, 6))
